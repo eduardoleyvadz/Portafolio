@@ -1,0 +1,98 @@
+---
+title: "Proceso Estocástico de Weiner"
+author:
+  - Eduardo Tomás Leyva Díaz
+output:
+  pdf_document: default
+---
+
+# PROYECCIÓN DE ACTIVOS FINNACIEROS
+
+Se utilizan algunas librerías
+
+```{r,warning=FALSE,message=FALSE}
+library(quantmod)
+```
+
+Carga de Datos con la función **getSymbols**
+```{r}
+cartera<-c("AMZN","NFLX")  #tickers de las empresas
+getSymbols(cartera,src="yahoo",from="2019-01-01",to="2024-08-30")
+```
+Se ocupan los precios del cierre ajustado
+```{r}
+datos<-AMZN$AMZN.Close
+```
+
+Calculando los **rendimientos**
+```{r}
+# convertir en dataframe
+datos<-as.data.frame(datos)
+datos$Ren<-NA
+
+# Rendimientos
+for(k in 2:length(datos$AMZN.Close)){
+  datos$Ren[k]<- (datos$AMZN.Close[k]/datos$AMZN.Close[k-1]) - 1
+}
+```
+
+Se obtienen los **estimadores**
+```{r}
+m<-mean(datos$Ren,na.rm=TRUE)
+m # media
+s<-sd(datos$Ren,na.rm=TRUE)
+s # desviación estándar
+
+
+```
+Haciendo la **proyección del Proceso**
+```{r}
+s0<-datos$AMZN.Close[length(datos$AMZN.Close)] # último precio conocido
+
+t<-1  # variaiciones diarias
+st<-c()  # proceso estocástico del precio
+n<-100   # días a simular
+
+for(k in 1:n){
+  if(k==1){
+    st[k]<-s0  # el punto de partida es el último precio
+  }else{
+    st[k]<-st[k-1]+st[k-1]*(m*t + s*sqrt(t)*rnorm(1,mean=0,sd=1))
+  } # PROCESO DE WEINER
+}
+```
+
+**Graficando**
+```{r}
+plot(st,type="l",col="blue")
+```
+**MATRIZ DE TRAYECTORIAS para m escenarios**
+
+En las filas van los días y en las columnas van los escenarios
+```{r}
+esc<-1000 # escenarios
+n<-100 # días de proyección
+stm<-matrix(data=NA,nrow=n,ncol=esc) # matriz
+
+for(j in 1:esc){
+  
+  for(k in 1:n){
+  if(k==1){
+    stm[k,j]<-s0  # en cada renglón se pone el mismo punto inicial
+  }else{
+    stm[k,j]<-stm[k-1,j]+stm[k-1,j]*(m*t + s*sqrt(t)*rnorm(1,mean=0,sd=1))
+  } # PROCESO DE WEINER
+}
+  
+}
+```
+
+**Graficando**
+
+```{r}
+plot(stm[,1],type="l",col=1,ylim=c(min(stm),max(stm)))
+for(k in 2:esc){
+  lines(stm[,k],type="l",col=k)
+}
+```
+

@@ -1,0 +1,132 @@
+---
+output:
+  pdf_document: default
+---
+
+# MODELOS DE VaR para simulación Bootstrap
+
+```{r,message=FALSE,warning=FALSE}
+# LIBRERÍAS
+library(quantmod)
+```
+
+Cargando los datos
+```{r}
+# Datos
+cartera<-c("BTC-USD")   # bitcoin
+getSymbols(cartera,src="yahoo",from="2020-01-01",to="2024-09-15")
+```
+Se toman los **precios de Cierre**
+```{r}
+d1<-`BTC-USD`$`BTC-USD.Close`
+d1<-as.data.frame(d1)
+colnames(d1)<-c("Bitcoin")
+```
+
+## Análisis del Vector de Precios
+```{r}
+plot(d1$Bitcoin,col="blue")
+boxplot(d1$Bitcoin)   # conocer datos atípicos
+hist(d1$Bitcoin,breaks = 30)
+summary(d1$Bitcoin)
+```
+
+\newpage
+
+## Análisis de los Rendimientos
+
+Primero se calculan los rendimientos
+
+```{r}
+d1$Rend<-NA
+m<-length(d1$Bitcoin)
+for(k in 2:m){
+  d1$Rend[k]<-log(d1$Bitcoin[k]/d1$Bitcoin[k-1])  # Rendimientos continuos
+}
+```
+
+Hay un periodo de estrés ya que se observa mucha volatilidad, por lo que estos datos no cumplen el principio de normalidad.
+```{r}
+plot(d1$Rend,type="l",col="blue")
+abline(h=0,col="red")
+abline(h=0.1,col="green")
+abline(h=-0.1,col="green")
+```
+
+## VaR por SIMULACIÓN BOOTSTRAP
+
+Después se realizará un remuestreo de estos rendimientos (con reemplazo).
+
+
+```{r}
+d1$RendSim<-NA
+d1$Reval<-NA       # reevaluación del activo
+d1$PL <- NA        # función de pérdida
+m
+```
+
+
+```{r}
+# Remuestreo de los Rendimientos
+for(k in 1:m){
+  d1$RendSim[k]<-sample(d1$Rend[2:m],1,replace=TRUE)
+  d1$Reval[k]<-d1$Bitcoin[m] * (1+d1$RendSim[k])  # reevaluación (predicción)
+  d1$PL[k]<-d1$Bitcoin[m] - d1$Reval[k]
+}
+```
+
+### Análisis de la Función de Pérdidas y Ganancias
+
+```{r}
+hist(d1$PL,breaks=30)  # distribución leptocúrtica (mucha kurtosis)
+```
+
+
+
+```{r}
+# VaR: es un percentil de la distribución de pérdidas
+# Pérdida máxima con un nivel de confianza alpha y un horizonte de tiempo de t días
+
+VaRSB<-quantile(d1$PL,c(0.90,0.95,0.99)) # 1-alpha
+VaRSB # diario
+```
+
+```{r}
+hist(d1$PL,breaks=30)  # distribución leptocúrtica (mucha kurtosis)
+abline(v=VaRSB[1],col="red")
+abline(v=VaRSB[2],col="green")
+abline(v=VaRSB[3],col="blue")
+```
+
+**A mayor nivel de confianza, mayor aversión al riesgo**.
+**Menor nivel de confianza, más conservador**.
+
+Rendimientos históricos vuelven a ocurrir de forma distinta. No se considera una distribución de los datos, se toman así como son.
+
+## VaR para n escenarios
+
+```{r}
+n<-100
+VaRSBn<-c()
+
+for(j in 1:n){
+  
+  # Remuestreo de los Rendimientos
+  for(k in 1:m){
+  d1$RendSim[k]<-sample(d1$Rend[2:m],1,replace=TRUE)
+  d1$Reval[k]<-d1$Bitcoin[m] * (1+d1$RendSim[k])  # reevaluación (predicción)
+  d1$PL[k]<-d1$Bitcoin[m] - d1$Reval[k]
+}
+
+  VaRSBn[j]<-as.numeric(quantile(d1$PL,0.99))   # calcular la pérdida máxima
+  
+  
+}
+```
+
+
+```{r}
+hist(VaRSBn,breaks=30)
+mean(VaRSBn)
+```
+
