@@ -1,0 +1,1297 @@
+---
+title: "EXAMEN 4: MODELOS DE CLASIFIACIÓN"
+author:
+- Bonilla Flores Emmanuel
+- García Morales Marcos
+- Hernández Galicia Alberto
+- Leyva Díaz Eduardo Tomás
+date: "2025-06-12"
+output: html_document
+---
+
+# LIBRERÍAS
+
+```{r, warning=FALSE, message=FALSE}
+library(readxl)
+library(MASS) #Para poder usar la función lda/qda
+library(nortest)
+library(ggpubr)
+library(MVN)
+library(biotools) # test de Matriz de Covarianzas
+library(ggplot2)
+library(caTools)
+library(caret)
+library(purrr) # La función map
+library(patchwork) # Ordenar gráficos ggplot2
+library(GGally) #pairplot
+library(tidyr) # Para utilizar la función drop.na
+library(dplyr)
+library(car)
+library(rpart)
+library(rpart.plot)
+library(randomForest) # Librería específica para el modelo de Random Forest
+library(MLmetrics)  # Para F1_Score
+setwd("~/Octavo Semestre/Análisis de Datos/Machine Learning")
+```
+
+# PREPARACIÓN DE DATOS
+
+## Base de Datos
+
+Este conjunto de datos contiene 11 características médicas que pueden utilizarse para predecir una posible enfermedad cardiaca, fue obtenido del repositorio en línea *Kaggle*, una plataforma de ciencia de datos que permite compartir y acceder a datasets públicos para el desarrollo de modelos de aprendizaje automático y análisis estadístico.
+
+  -**Soriano, F. (2021). Heart Failure Prediction Dataset [Dataset]. Kaggle. https://www.kaggle.com/datasets/fedesoriano/heart-failure-prediction**
+  
+Para la construcción del dataset se integraron datos clínicos de cinco bases públicas (Statlog, Cleveland, Hungarian, Switzerland y Long Beach VA), cada una con registros similares en las 11 columnas principales generando 918 observaciones (filas) y 12 variables (columnas) considerando la predicción. En la siguiente tabla se puede var un fragmento de estos datos:
+
+```{r}
+heart<-read.csv("heart.csv")
+head(heart[,1:6],10)
+head(heart[,7:12],10)
+```
+
+### Descripción de Variables
+
+De las 12 variables de todo el conjunto de datos hay algunas que son numéricas y otras que son categóricas, a continuación se presenta una breve descripción de cada una para entender de mejor manera los valores disponibles.
+
+**NUMÉRICAS**
+
+  - **Age**: Edad del paciente (años).
+  - **RestingBP**: Presión arterial en reposo (mm Hg).
+  - **Cholesterol**: Nivel de colesterol (mg/dl).
+  - **MaxHR**: Frecuencia cardíaca máxima alcanzada durante una prueba de esfuerzo.
+  - **Oldpeak**: Depresión del segmento ST inducida por ejercicio.
+  
+**CATEGÓRICAS**
+
+  - **Sex**: Sexo del paciente (M: Male, F: Female).
+  - **ChestPainType**: Tipo de dolor en el pecho, hay cuatro resultados posibles:TA-Angina Típica, ATA-Angina Atípica, NAP-Dolor no anginoso y ASY-Asintomático.
+  - **FastingBS**: Glucosa en ayunas, si es mayor a 120 mg/dl se le asigna el valor de 1 (hiperglusemia) y si no toma el valor de 0.
+  - **RestingECG**: Electrocardiograma en reposo, puede resultar en Normal, LVH y ST. 
+  - **ExerciseAngina**: Angina inducida por ejercicio, si hay un dolor o molestia en el pecho cuando la persona hace actividad física vale 1 y si no 0.
+  - **ST_Slope**: Pendiente del segmento ST al final del ejercicio, puede ser Up (ascendente), Down (descendente) o Flat (plana).
+  - **HeartDisease**: Es el target o la clase objetivo, indica la presencia (1) o ausencia (0) de la enfermedad cardíaca.
+
+Al momento de realizar los modelos se tomarán en cuenta todas las variables debido a que representan distintos aspectos de la salud física y hábitos de vida que combinados permiten identificar señales tempranas o patrones comunes en personas con enfermedad cardíaca, es decir, ayuda a médicos o investigadores a determinar factores de riesgo clave.
+
+### Propósito
+
+Se desarrollarán y evaluarán cuatro modelos de clasificación supervisada a través de una Matriz de Confusión donde se permite visualizar los aciertos o errores de cada modelo (métricas), estos son:
+
+  - Regresión Logística
+  - Análisis Discriminante Cuadrático (QDA)
+  - Árbol de Decisión
+  - Bosque Aleatorio
+
+El objetivo principal es seleccionar el modelo que logre una clasificación precisa entre personas con y sin enfermedad cardíaca, priorizando la capacidad del modelo para identificar correctamente a los pacientes que sí presentan la enfermedad. Por esta razón se dará especial énfasis a la **Sensibilidad o Recall**, métrica clave para minimizar los errores Tipo II (falsos negativos), ya que estos representan un riesgo mayor al no detectar a personas que requieren atención médica.
+
+## Limpieza y Preparación
+
+Antes de realizar cualquier cosa se va a generar una copia de la base de datos para que la información original no sufra cambios. Es en ese nuevo data frame donde se harán todas las modificaciones comenzando por el nombre de las columnas para hacer referencia con mayor facilidad y también para la interpretación de resultados.
+
+```{r}
+# Copia
+enfermedad<-heart
+colnames(enfermedad)<-c("Edad","Sexo","Dolor_Pecho","Presión_Reposo","Colesterol",
+                        "Glucosa_Ayunas","Electrocardiograma_Reposo","Frecuencia_Máxima",
+                        "Angina_Ejercicio","Depresión_ST","Pendiente_ST","Enfermedad_Cardíaca")
+head(enfermedad)
+```
+
+### Valores Faltantes
+
+Verificamos si tiene registros que estén incompeltos para tomar una decisión de que hacer con ellos antes de hacer cualquier análisis.
+
+```{r}
+colSums(is.na(enfermedad))
+```
+La información está completa y no le falta ningún dato.
+
+### Variables Categóricas
+
+Como ya se mencionó, dentro de la base de datos tenemos algunas variables que son binarias como el Sexo, Glucosa_Ayunas, o Angina_Ejercicio, además de otras que tienen más valores posibles como Dolor_Pecho, Electrocardiograma_Reposo o Pendiente_SP. Lo que se va a hacer es convertirlas a factor para que puedan ser consideradas en el modelo.
+
+**NOTA: En algunos casos se cambiaron los valores originales por otros que son más fáciles de entender y de interpretar**.
+
+```{r}
+# Converitrlos a Factor
+enfermedad$Enfermedad_Cardíaca<-factor(enfermedad$Enfermedad_Cardíaca,
+                                levels=c(0,1),labels=c("Sin Enfermedad","Con Enfermedad"))
+enfermedad$Dolor_Pecho<-factor(enfermedad$Dolor_Pecho)
+enfermedad$Glucosa_Ayunas<-factor(enfermedad$Glucosa_Ayunas,levels=c(0,1),labels=c("No","Sí"))
+enfermedad$Electrocardiograma_Reposo<-factor(enfermedad$Electrocardiograma_Reposo)
+enfermedad$Angina_Ejercicio<-factor(enfermedad$Angina_Ejercicio,
+                                    levels=c("N","Y"),labels=c("No","Sí"))
+enfermedad$Pendiente_ST<-factor(enfermedad$Pendiente_ST)
+
+glimpse(enfermedad)
+```
+
+## Manipulación de Datos
+
+Lo primero que se va a realizar es un análisis exploratorio de la base para conocer un poco más de información sobre las variables predictoras y de respuesta, específicamente se hará un resumen estadístico con las medidas más importantes acompañadas de gráficos como boxplots o histogramas.
+
+### Resumen Estadístico
+
+Es posible armar una tabla que contenga la información estadística más relevante de las variables numéricas debido a que nos ayudará a saber el comportamiento general de los datos.
+
+```{r}
+# Variables Numéricas
+num_vars <- sapply(enfermedad, is.numeric)
+enfermedad_num <- enfermedad[, num_vars]
+
+resumen<-function(x){
+  y<-enfermedad_num[[x]]     # vector con los datos
+  df<-data.frame(Variable=x)
+  df<-df %>% mutate(Mínimo=min(y),Bigote_Inferior=boxplot.stats(y)$stats[1],
+            Q1=quantile(y,0.25),Mediana = median(y), Media = mean(y),
+            Q3=quantile(y,0.75), Bigote_Superior=boxplot.stats(y)$stats[5],
+            Máximo=max(y))
+  return(df)
+}
+resumen_estadistico<-map_dfr(colnames(enfermedad_num),resumen)
+resumen_estadistico
+```
+
+Una vez armada la tabla es posible rescatar lo siguiente:
+
+  - La edad promedio es de 53.51 años, el paciente más joven tiene 28 y el más grande 77.
+  
+  - El 25% de estos pacientes alcanzan una Frecuencia Máxima que supera los 156, esto indica que se aceleraron mucho al hacer el esfuerzo físico, incluso el valor más alto es de 202.
+  
+  - Hay casos donde posiblemente haya outliers debido a que los valores del Bigote Inferior o Superior no coinciden con el Mínimo o el Máximo, esto ocurre en todas las variables menos para la Edad.
+  
+  - Viendo la asimetría de los datos, existe un sesgo hacia la izquierda Edad, Colesterol y Frecuencia Máxima (la mediana supera a la media), mientras que hay un sesgo a la derecha para la Presión en Reposo y la Depresión del Segmento T.
+  
+  - Para el Colesterol y la Presión en Reposo aparecen valores iguales a 0, esto es improbable y puede ser que haya un error en el registro.
+  
+  - La depresión ST es la única variable que tiene algunos valores negativos, el 50% es menor o igual a los 0.6.
+
+### Histogramas
+
+En los Histogramas de Frecuencia se puede apreciar los sesgos mencionados con anterioridad, por eso se le colocó el número de bins correspondiente a la regla de FD (datos con sesgos).
+
+```{r}
+# HISTOGRAMAS
+par(mfrow=c(3,2))
+titulos<-colnames(enfermedad_num)
+colores<-rainbow(length(titulos))
+for(i in 1:length(titulos)){
+  hist(enfermedad_num[[i]],col=colores[i],main=paste("Histograma de",titulos[i]),
+       xlab="Valores",ylab="Frecuencia",breaks=nclass.FD(enfermedad_num[[i]]))
+}
+```
+
+
+### Boxplots
+
+```{r}
+# BOXPLOTS
+titulos<-colnames(enfermedad_num)
+colores<-rainbow(length(titulos))
+for(i in 1:length(titulos)){
+  boxplot(enfermedad_num[[i]],col=colores[i],main=paste("Boxplot",titulos[i]),
+          ylab="Valores")
+}
+```
+ 
+  - Aquí se confirma la presencia de los valores atípicos (puntos debajo o por arriba de los bigotes) en casi todas las variables.
+  
+  - La Frecuencia Máxima y el Colesterol tienen el mayor rango intercuantil (IQR), lo cual muestra que para estas dos variables hay dispersión de los datos.
+  
+  - Para la Presión en Reposo se ve que la caja es la más pequeña y equilibrada, además de que se observan los datos registrados como 0 cuando dentro del contexto es imposible porque los marca como outliers.
+
+### Proporciones
+
+Es importante tener presente la cantidad de datos que corresponden a cada clase, esto para ver si no hay algún desbalance o que la mayoría de datos pertenezcan solamente a una porque puede impactar en las predicciones.
+
+```{r}
+# Clases
+proporciones<- enfermedad %>% group_by(Enfermedad_Cardíaca) %>% summarise(Total = n()) %>% 
+               mutate(Proporción=Total / sum(Total))
+proporciones
+```
+
+```{r}
+barplot(Total ~ Enfermedad_Cardíaca, data = proporciones,xlab="Estatus",
+        main="Cantidad de Datos por Clase",col=c("forestgreen","firebrick"))
+```
+Hay más pacientes con la presencia de la enfermedad cardíaca, pero podemos ver que la proporción no varía mucho y están equilibrados.
+
+Por otro lado, podemos observar los niveles o categorías de cada variable convertida a factor con el objetivo de tener presente cuáles son los posibles valores que pueden salir en cada una.
+
+```{r}
+# Niveles
+variables_factor <- sapply(enfermedad, is.factor)
+for (variable in names(enfermedad)[variables_factor]) {
+  cat("Variable:", variable, "\n")
+  print(levels(enfermedad[[variable]]))
+  cat("\n")
+}
+```
+```{r}
+head(heart[,c(1,4,5,8,10)],10)
+head(heart[,-c(1,4,5,8,10)],10)
+```
+
+
+# MODELO LOGÍSTICO
+
+## Separación de Clases
+
+```{r,message=FALSE, warning=FALSE}
+# Hacer el ggpairs solo con las numéricas
+enfermedad_num$Enfermedad_Cardíaca<-enfermedad$Enfermedad_Cardíaca
+enfermedad_num<- enfermedad_num %>% dplyr::select(Enfermedad_Cardíaca,everything())
+ggpairs(data = enfermedad_num, aes(color=Enfermedad_Cardíaca))
+```
+
+**Boxplots**
+
+Comparan las distribuciones de variables continuas según la presencia o ausencia de enfermedad, estas mismas muestran la mediana, cuartiles y posibles outliers.
+
+- Las personas con enfermedad cardíaca tienden a ser mayores que las que no la tienen.
+- Las personas con enfermedad tienen, en general, menor frecuencia cardíaca máxima.
+- En todas las variables existen valores atípicos, lo cual se debe tomar en cuenta para pruebas posteriores.
+
+**Histogramas** 
+
+Representan la distribución de cada variable individualmente.Están separados por color según presencia o ausencia de enfermedad.
+
+- No se observan diferencias claras entre los grupos, si acaso en la edad o en la Frecuecia Máxima.
+- Para el histograma de Depresión ST se aprecia un pico en los valores para las personas que no tienen la enfermedad. 
+
+**Graficos de dispersión**
+
+Muestran relaciones bivariadas entre pares de variables
+
+**Correlaciones**
+Incluyen el coeficiente de Pearson, en este caso vemos el grado de correlación:
+
+- Correlaciones bajas, ya sean positivas o negativas
+- Edad correlaciona positivamente con Depresión_ST.
+
+
+## Aplicación del Modelo
+
+Dividimos nuestros datos en "Entrenamiento" y "Prueba" aplicando una proporción de 80% y 20% respectivamente.
+```{r}
+set.seed(123)
+barajeado <- slice_sample(enfermedad, prop = 1)
+split <- sample.split(barajeado$Edad, SplitRatio = 0.8) # Vector lógico 
+enfermedad_train <- subset(barajeado, split == TRUE)
+enfermedad_test <- subset(barajeado, split == FALSE)
+head(enfermedad_train)
+head(enfermedad_test)
+
+# Ajuste del modelo de regresión logística
+modelo_logistico<- glm(Enfermedad_Cardíaca~ ., 
+              data = enfermedad_train, 
+              family = binomial)
+
+# Resumen del modelo
+summary(modelo_logistico)
+```
+
+Antes de pasar a la interpretación de cada uno de los coeficientes, vamos a analizar por qué tiene sentido clínico que ciertas variables hayan resultado **significativas** en el modelo, veamos:
+
+-  SexoM: Ser hombre aumenta significativamente el riesgo de enfermedad cardíaca, esto porque los hombres suelen tener mayor riesgo cardiovascular que las mujeres antes de la menopausia por diferencias hormonales. Esto era esperado
+- Dolor_Pecho:  El dolor torácico típicamente anginoso es el que más se asocia a enfermedad coronaria. Los atípicos o no anginosos, aunque pueden ser dolorosos, son menos específicos de enfermedad cardíaca.
+- Glucosa: Tener glucosa alta incrementa significativamente la probabilidad de enfermedad.
+
+- Colesterol: El coeficiente negativo indica que a mayor nivel de colesterol, menor es la probabilidad de enfermedad cardíaca, lo cual parece contradictorio clínicamente.
+
+- Glucosa_Ayunas: Tener glucosa alta incrementa significativamente la probabilidad de enfermedad.
+
+- Depresión: Cada unidad de depresión del ST incrementa el riesgo de enfermedad cardíaca. Coherente con la evidencia médica.
+
+## Interpretación de Coeficientes
+
+En términos de Log-odds y odds.
+
+- SexoM (1.4944)(4.46) : Ser hombre multiplica por 4.46 las odds de tener enfermedad cardiaca
+- Dolor_Pecho (-1.7199,-1.6672,-1.7568)(0.18,0.19,0.17): Dado que es negativo el coeficiente, esto nos quiere decir que reduce en (1-odd) la odd.
+- Colesterol(-0.0034)(0.9966): Cada unidad adicional de colesterol reduce las odds en 0.34%.
+- Glucosa_AyunasSí (1.013087)(2.75): 	Si tiene glucosa en ayunas alta, las odds aumentan 2.75 veces.
+- Angina_EjercicioSí (0.846031)(2.33) : Tener angina con ejercicio duplica las odds de enfermedad cardíaca.
+- Depresión_ST (0.343046)(1.41) : Cada unidad más de depresión ST aumenta las odds en 41%.
+- Pendiente_STUp (-1.518302)(0.22) : Reduce las odds en 78% si la pendiente del ST sube.
+
+
+## Matriz de Confusión
+
+El siguiente paso es hacer la evaluación del modelo, así que se calculan las predicciones con el conjunto de prueba y se genera la matriz de confusión.
+
+```{r}
+# Paso 1: Calcular las probabilidades para los datos de prueba
+probabilidades <- predict(modelo_logistico,newdata=enfermedad_test,type="response")
+head(probabilidades)
+
+# Paso 2: Convertir probabilidades en clases 0 o 1 con umbral 0.5
+predicciones_clase <- ifelse(probabilidades < 0.5,"Sin Enfermedad","Con Enfermedad")
+head(predicciones_clase)
+```
+
+
+```{r}
+# Hay que asegurarse que ambas estén como factores
+y_real<-enfermedad_test$Enfermedad_Cardíaca
+y_pred<-factor(predicciones_clase,levels=c("Sin Enfermedad","Con Enfermedad"))
+
+# Matriz de confusión y métricas
+conf_matrix <- confusionMatrix(data=y_pred,reference=y_real,positive="Con Enfermedad")
+print(conf_matrix$table)
+
+# Métricas individuales
+accuracy <- conf_matrix$overall["Accuracy"] # Proporción total de predicciones correctas.
+precision <- conf_matrix$byClass["Precision"]
+recall <- conf_matrix$byClass["Recall"]
+f1 <- conf_matrix$byClass["F1"]
+
+# Imprimir métricas
+cat("Accuracy (Exactitud):", accuracy, "\n")
+cat("Precision (Precisión):", precision, "\n")
+cat("Recall (Sensibilidad):", recall, "\n")
+cat("F1 Score:", f1, "\n")
+```
+
+```{r}
+cm_table <- as.data.frame(conf_matrix$table)
+
+# Invertir el orden de los niveles del eje Y
+cm_table$Prediction <- factor(cm_table$Prediction, levels = rev(levels(cm_table$Prediction)))
+
+ggplot(cm_table, aes(x = Reference, y = Prediction, fill = Freq)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), color = "white", size = 6, fontface = "bold") +
+  scale_fill_gradient(low = "lightblue", high = "darkblue",name="Frecuencia") +
+  labs(
+    title = "MATRIZ DE CONFUSIÓN",
+    x = "Valor Real",
+    y = "Predicción"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+    axis.text = element_text(size = 12,face="bold"),
+    axis.title = element_text(size = 12,face="bold")
+  )
+```
+
+- Accuracy( Exactitud): El modelo clasifica correctamente al 86.3% de los casos 
+- Precision (Precisión): De todas las personas clasificadas como con enfermedad, el 83.5% realmente la tienen.
+- Recall (Sensibilidad): De todas las personas que realmente tienen enfermedad cardíaca, el 91.5% fueron correctamente detectadas.
+- F1 Score: El modelo tiene un muy buen balance entre precisión y sensibilidad.El modelo tiene balance entre detectar correctamente a los enfermos (recall) y no generar demasiados falsos positivos (precisión).
+
+En el contexto de salud, un falso negativo (no detectar a alguien enfermo) puede tener consecuencias graves. Por eso, la alta sensibilidad (91.5%) es la métrica más relevante en este caso.
+El modelo prioriza correctamente la detección de pacientes con riesgo, lo cual es deseable para la prevención y tratamiento oportuno.
+
+
+## Modelo Step
+
+A continuación, utilizamos el método step() para realizar una selección automática de variables en nuestro modelo de regresión logística. Este procedimiento parte de un modelo completo con todas las variables, y mediante un proceso llamado selección hacia adelante y hacia atrás (direction = "both"), elimina o incluye variables en función del criterio AIC (Criterio de Información de Akaike), buscando obtener el modelo más eficiente sin variables innecesarias. Esto nos ayuda a simplificar el modelo, manteniendo solo aquellas variables que realmente aportan a la predicción de la enfermedad cardíaca.
+
+
+```{r}
+modelo_step <-step(glm(Enfermedad_Cardíaca~ ., family = binomial, data = enfermedad_train), direction = "both")
+summary(modelo_step)
+```
+
+Obtuvimos un modelo más compacto y eficiente, que mantiene las variables clínicamente más relevantes, como el tipo de dolor en el pecho, los niveles de colesterol y glucosa, y la presencia de angina inducida por ejercicio. 
+
+- SexoM: Ser hombre incrementa significativamente el riesgo de enfermedad cardíaca. Esto se explica por el mayor riesgo cardiovascular que presentan los hombres en edad media, debido en parte a la protección hormonal que tienen las mujeres antes de la menopausia.
+- Dolor_Pecho: El tipo de dolor en el pecho es uno de los indicadores clínicos más fuertes. El dolor típicamente anginoso (ASY) está más estrechamente relacionado con enfermedad coronaria, mientras que los dolores atípicos (ATA, NAP, TA) tienen menor especificidad diagnóstica.
+
+- Glucosa_Ayunas: La presencia de glucosa elevada en ayunas es un claro marcador de alteraciones metabólicas como la diabetes o la resistencia a la insulina, condiciones altamente asociadas a eventos cardiovasculares.
+
+- Colesterol: Aunque clínicamente se asocia un mayor nivel de colesterol con mayor riesgo cardiovascular, en este modelo su coeficiente resultó negativo. Esto podría explicarse por la presencia de pacientes tratados o con valores anómalos que distorsionan esta relación, o porque otras variables explican mejor el riesgo.
+
+- Angina_Ejercicio: La presencia de angina inducida por el ejercicio es un signo de isquemia cardíaca, lo que la convierte en un fuerte predictor de enfermedad coronaria.
+
+- Depresión_ST: Cada unidad adicional en la depresión del segmento ST refleja un mayor grado de isquemia durante el esfuerzo. Este hallazgo es coherente con lo observado en pruebas de esfuerzo y tiene alta relevancia clínica.
+
+- Pendiente_ST: La morfología del segmento ST es un indicador clave en los estudios electrocardiográficos. Una pendiente "plana" o descendente suele asociarse a mayor riesgo, mientras que una pendiente "ascendente" (Up) generalmente se considera normal.
+
+### Interpretación de Coeficientes
+
+En términos de Log-odds y odds.
+
+- SexoM (1.5099)(4.53) : Ser hombre multiplica por 4.53 las odds de presentar enfermedad cardíaca.
+
+- Dolor_Pecho (-1.7705,-1.7158,-1.8029)(0.17,0.18,0.16): Estos tipos de dolor reducen las odds de enfermedad cardíaca en más del 80% respecto al tipo de referencia (ASY).
+
+- Colesterol(-0.0034)(0.9966): Cada unidad adicional de colesterol reduce las odds en 0.9966%.
+
+- Glucosa_AyunasSí (0.9759)(2.65): 	Si tiene glucosa en ayunas alta, las odds aumentan 2.65 veces.
+
+- Angina_EjercicioSí (0.8639)(2.37) : Tener angina con ejercicio duplica las odds de enfermedad cardíaca.
+
+- Depresión_ST (0.3225)(1.38) : Cada unidad más de depresión ST aumenta las odds en 38%.
+
+- Pendiente_ST (0.8979,-1.6137)(2.45,0.20) : Una pendiente plana multiplica por 2.45 las odds de enfermedad, mientras que una pendiente ascendente reduce las odds en 80%.
+
+### Matriz de Confusión
+
+Esto permite interpretar mejor los factores de riesgo sin sacrificar capacidad predictiva.Que lo veremos a continuación
+
+```{r}
+# Paso 1: Calcular las probabilidades para los datos de prueba
+probabilidades <- predict(modelo_logistico,newdata=enfermedad_test,type="response")
+head(probabilidades)
+
+# Paso 2: Convertir probabilidades en clases 0 o 1 con umbral 0.5
+predicciones_clase <- ifelse(probabilidades < 0.5,"Sin Enfermedad","Con Enfermedad")
+head(predicciones_clase)
+```
+
+```{r}
+# Hay que asegurarse que ambas estén como factores
+y_real<-enfermedad_test$Enfermedad_Cardíaca
+y_pred<-factor(predicciones_clase,levels=c("Sin Enfermedad","Con Enfermedad"))
+
+# Matriz de confusión y métricas
+conf_matrix <- confusionMatrix(data=y_pred,reference=y_real,positive="Con Enfermedad")
+print(conf_matrix$table)
+
+# Métricas individuales
+accuracy <- conf_matrix$overall["Accuracy"] # Proporción total de predicciones correctas.
+precision <- conf_matrix$byClass["Precision"]
+recall <- conf_matrix$byClass["Recall"]
+f1 <- conf_matrix$byClass["F1"]
+
+# Imprimir métricas
+cat("Accuracy (Exactitud):", accuracy, "\n")
+cat("Precision (Precisión):", precision, "\n")
+cat("Recall (Sensibilidad):", recall, "\n")
+cat("F1 Score:", f1, "\n")
+```
+
+
+```{r}
+cm_table <- as.data.frame(conf_matrix$table)
+
+# Invertir el orden de los niveles del eje Y
+cm_table$Prediction <- factor(cm_table$Prediction, levels = rev(levels(cm_table$Prediction)))
+
+ggplot(cm_table, aes(x = Reference, y = Prediction, fill = Freq)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), color = "white", size = 6, fontface = "bold") +
+  scale_fill_gradient(low = "lightblue", high = "darkblue",name="Frecuencia") +
+  labs(
+    title = "MATRIZ DE CONFUSIÓN",
+    x = "Valor Real",
+    y = "Predicción"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+    axis.text = element_text(size = 12,face="bold"),
+    axis.title = element_text(size = 12,face="bold")
+  )
+```
+
+Se obtuvieron las mismas métricas que en el primer modelo logístico, por lo que la interpretación es la misma.
+
+# ANÁLISIS DISCRIMINANTE LINEAL (LDA) O CUADRÁTCIO (QDA)
+
+Para empezar el modelado de nuestro LDA O QDA, primero tenemos que separar nuestras varaibles númericas, haciendo caso omiso por el momento de las categóricas, asi mismo esto lo haremos para train y test.
+
+```{r}
+# VARIABLES NUMÉRICAS
+enfermedad_train_num<-data.frame(select_if(enfermedad_train,is.numeric),
+                            Enfermedad_Cardíaca=enfermedad_train$Enfermedad_Cardíaca)
+enfermedad_test_num<-data.frame(select_if(enfermedad_test,is.numeric),
+                            Enfermedad_Cardíaca=enfermedad_test$Enfermedad_Cardíaca)
+```
+
+Ahora sí se da paso a la verifiación de los 4 supuestos.
+
+### Normalidad Univariada
+
+Verificar la normalidad de los datos para cada variable en cada grupo y la normalidad multivariada.
+```{r}
+vars <- names(enfermedad_train_num)[-6]  # Excluye la columna de la clase
+sapply(vars, function(var) {
+  # Separación por clases para verificar normalidad
+  tapply(enfermedad_train_num[[var]],enfermedad_train_num$Enfermedad_Cardíaca,function(x){
+    p <- lillie.test(x)$p.value
+    if (p > 0.05) {
+      return(paste0("p = ", round(p, 4), " → Normal"))
+    } else {
+      return(paste0("p = ", round(p, 4), " → No normal"))
+    }
+  })
+})
+```
+
+Aquí estamos aplicando el test de Lilliefors para cada variable, separando por dos grupos:
+- Sin enfermedad cardíaca
+- Con enfermedad cardíaca
+Para ver si la distribución de cada variable es normal en cada grupo:
+
+En este caso, todas las variables tienen p menor al nivel de significancia, por lo tanto en el contexto de LDA (Linear Discriminant Analysis), esta es una señal de que los supuestos de normalidad no se cumplen.
+
+Ahora vamos con la normalidad multivariada (que es más importante para LDA).
+
+
+### Normalidad Multivariada
+
+Se utilizó el test de Henze-Zirkler (HZ) debido a que es una prueba robusta ante valores atípicos y por el tamaño de los datos.
+
+```{r}
+mvn(data=subset(enfermedad_train_num,Enfermedad_Cardíaca=="Sin Enfermedad")[,-6],
+    mvn_test="hz")
+mvn(data=subset(enfermedad_train_num,Enfermedad_Cardíaca=="Con Enfermedad")[,-6],
+    mvn_test="hz", multivariate_outlier_method="quan")
+```
+Ahora vemos la normalidad multivariada con el test de Henze-Zirkler (HZ), y también viendo la normalidad univariada con el test de Anderson-Darling, ambos realizados por grupo (Sin Enfermedad y Con Enfermedad).
+
+En el grupo sin enfermedad y con enfermedad vemos que se ocupa el test de Henze-Zirkler, donde nos arroja un p-value de <0.001, eso nos quiere decir que se rechaza H0 con la hipotesis de que habia normalidad multivariada. Lo cual , es un problema importante para el supuesto LDA, entonces procedemos a ocupar un modelo QDA( Quadatric Discriminant Analysis).
+
+### Igualdad de Varianzas
+
+Aquí verificamos si la varianza de cada variable es igual entre los grupos, más que nada para verificar o detectar desequilibrios que podrían afectar la estabilidad del modelo, ya desde el punto de vista univariado, dado que solo dos variables cumplen la igualdad de varianzas, el supuesto de homocedasticidad se viola parcialmente.
+
+```{r}
+# La varianzas son iguales
+leveneTest(Edad~Enfermedad_Cardíaca,data=enfermedad_train_num)
+# La varianzas NO son iguales
+leveneTest(Presión_Reposo~Enfermedad_Cardíaca,
+           data=enfermedad_train_num)
+# La varianzas NO son iguales
+leveneTest(Colesterol~Enfermedad_Cardíaca,data=enfermedad_train_num)
+ # La varianzas son iguales
+leveneTest(Frecuencia_Máxima~Enfermedad_Cardíaca,
+           data=enfermedad_train_num)
+ # La varianzas NO son iguales
+leveneTest(Depresión_ST~Enfermedad_Cardíaca,
+           data=enfermedad_train_num)
+```
+
+### Matriz de Varianzas y Covarianzas
+
+```{r}
+boxM(data=enfermedad_train_num[,-6],grouping=enfermedad_train_num$Enfermedad_Cardíaca)
+# Las matrices de covarianza NO son iguales.
+```
+
+Podemos ver que nuestro p-value < 2.2e-16, es decir que rechazamos nuestra hipotesis nula, lo que significa que las matrices de covarianza son significativamente distintas entre grupos. Esta es una violación crítica para LDA, ya que el método asume que todos los grupos tienen la misma estructura de covarianza. La desigualdad genera decisiones de clasificación subóptimas o sesgadas.
+
+## Modelo QDA
+
+El modelo QDA (Análisis Discriminante Cuadrático) estima una función discriminante diferente para cada grupo, permitiendo que cada clase tenga su propia matriz de covarianzas y vector de medias. Esto le permite modelar fronteras no lineales entre las clases.Aunque QDA no entrega coeficientes como LDA, podemos identificar la importancia relativa de cada variable comparando las medias de cada grupo.**Cuanto mayor es la diferencia entre medias, mayor es su capacidad para discriminar entre clases.**
+
+```{r}
+modelo_qda<-qda(Enfermedad_Cardíaca~.,data=enfermedad_train)
+modelo_qda$prior   # prior probabilities
+modelo_qda$means # medias
+predicciones<-predict(object=modelo_qda,newdata=enfermedad_test)
+predicciones$posterior
+clase_predicha<-predicciones$class
+clase_predicha
+```
+
+- Frecuencia_Máxima: Es la variable más discriminante. Los pacientes sin enfermedad tienden a alcanzar frecuencias cardíacas máximas más altas.
+- Depresión_ST: Segundo indicador más importante; los pacientes con enfermedad tienen valores mucho mayores.
+- Colesterol y Edad también presentan diferencias marcadas, siendo útiles para la separación.
+- Variables como Angina_EjercicioSí y Pendiente_STUp también aportan información valiosa.
+- Algunas variables categóricas (como Dolor_Pecho en sus variantes) también aportan discriminación, aunque en menor grado.
+
+## Matriz de Confusión
+
+
+```{r}
+dato_real<-enfermedad_test$Enfermedad_Cardíaca
+dato_predicho<-factor(clase_predicha,levels=c("Sin Enfermedad","Con Enfermedad"))
+
+# Matriz de confusión y métricas
+conf_matrix <- confusionMatrix(data=dato_predicho,reference=dato_real,
+                               positive="Con Enfermedad")
+print(conf_matrix$table)
+
+# Métricas individuales
+accuracy <- conf_matrix$overall["Accuracy"] # Proporción total de predicciones correctas.
+precision <- conf_matrix$byClass["Precision"]
+recall <- conf_matrix$byClass["Recall"]
+f1 <- conf_matrix$byClass["F1"]
+
+# Imprimir métricas
+cat("Accuracy (Exactitud):", accuracy, "\n")
+cat("Precision (Precisión):", precision, "\n")
+cat("Recall (Sensibilidad):", recall, "\n")
+cat("F1 Score:", f1, "\n")
+```
+
+```{r}
+cm_table <- as.data.frame(conf_matrix$table)
+
+# Invertir el orden de los niveles del eje Y
+cm_table$Prediction <- factor(cm_table$Prediction, levels = rev(levels(cm_table$Prediction)))
+
+ggplot(cm_table, aes(x = Reference, y = Prediction, fill = Freq)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), color = "white", size = 6, fontface = "bold") +
+  scale_fill_gradient(low = "lightblue", high = "darkblue",name="Frecuencia") +
+  labs(
+    title = "MATRIZ DE CONFUSIÓN",
+    x = "Valor Real",
+    y = "Predicción"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+    axis.text = element_text(size = 12,face="bold"),
+    axis.title = element_text(size = 12,face="bold")
+  )
+```
+
+- Accuracy (Exactitud): El 85.7% de las predicciones fueron correctas.
+- Precision (Precisión): El 84% de las veces que se predijo "Con Enfermedad", realmente era cierto.
+- Recall (Sensibilidad): El modelo identifica correctamente el 89.4% de los pacientes que realmente tienen enfermedad.
+- F1 Score: Es el promedio armónico entre precisión y recall. Una métrica balanceada, útil si hay desbalance de clases.
+
+Chequemos los dos posibles errores, en este caso en FP, el cual tenemos 16, se predijo enfermedad en pacientes sanos, esto puede generar ansidedad o intervenciones médicas innecesarias. Ahora , el otro error, los FN, que tenemos 10, se predijo "sin enfermedad" en pacientes enfermos, esto es critico, ya que el paciente enfermo no recibe tratamiento a tiempo.
+En este sentido nos interesa la sensibilidad, ya que es crítico en contextos médicos para no pasar por alto pacientes enfermos
+
+# ÁRBOL DE DECISIÓN
+
+El planteamiento para esta técnica será crear 5 árboles de decisión distintos donde cada uno será producto de una modificación en la función rpart, al final se eligirá el que arroje la mejor métrica del Recall o Sensibilidad. Lo que se va a realizar es:
+
+  - Índice de Gini
+  - Profundidad
+  - Ganancia de Información
+  - Validación Cruzada
+  - Poda del Árbol
+
+## Índice de Gini
+
+Entrenamiento del árbol con el índice de Gini, el índice de Gini es una medida de impureza que indica la probabilidad de que una instancia sea clasificada incorrectamente. 
+```{r}
+# Entrenamiento del árbol con índice Gini
+modelo <- rpart(Enfermedad_Cardíaca ~ ., data = enfermedad_train, method = "class", parms = list(split = "gini"))
+```
+
+Visualizamos el árbol
+```{r}
+rpart.plot(modelo, type = 2, extra = 104)
+```
+
+Realizamos nuestras predicciones
+```{r}
+y_pred <- predict(modelo, newdata = enfermedad_test, type = "class")
+y_pred
+```
+
+Generamos la matriz de confusión
+```{r}
+y_real <- enfermedad_test$Enfermedad_Cardíaca
+
+conf_matrix <- confusionMatrix(data = y_pred, reference = y_real, positive = "Con Enfermedad")
+print(conf_matrix$table)
+```
+
+Extraemos las métricas
+```{r}
+# Extraer métricas
+accuracy <- conf_matrix$overall["Accuracy"]
+precision <- conf_matrix$byClass["Precision"]
+recall <- conf_matrix$byClass["Recall"]
+f1 <- conf_matrix$byClass["F1"]
+
+# Imprimir métricas
+cat("Accuracy (Exactitud):", accuracy, "\n")
+cat("Precision (Precisión):", precision, "\n")
+cat("Recall (Sensibilidad):", recall, "\n")
+cat("F1 Score:", f1, "\n")
+```
+
+## Máximo de Niveles
+
+Se trabajará con el mejor árbol que cumpla tener 3 o menos niveles
+
+```{r}
+modelo2 <- rpart(Enfermedad_Cardíaca ~ ., data = enfermedad_train, method = "class", parms = list(split = "gini"), control = rpart.control(maxdepth = 3))
+```
+
+Visualizamos el árbol
+```{r}
+rpart.plot(modelo2, type = 2, extra = 104)
+```
+
+Realizamos nuestras predicciones
+```{r}
+y_pred <- predict(modelo2, newdata = enfermedad_test, type = "class")
+y_pred
+```
+
+Generamos la matriz de confusión
+```{r}
+y_real <- enfermedad_test$Enfermedad_Cardíaca
+
+conf_matrix <- confusionMatrix(data = y_pred, reference = y_real, positive = "Con Enfermedad")
+print(conf_matrix$table)
+```
+
+Extraemos las métricas
+```{r}
+# Extraer métricas
+accuracy <- conf_matrix$overall["Accuracy"]
+precision <- conf_matrix$byClass["Precision"]
+recall <- conf_matrix$byClass["Recall"]
+f1 <- conf_matrix$byClass["F1"]
+
+# Imprimir métricas
+cat("Accuracy (Exactitud):", accuracy, "\n")
+cat("Precision (Precisión):", precision, "\n")
+cat("Recall (Sensibilidad):", recall, "\n")
+cat("F1 Score:", f1, "\n")
+```
+
+## Ganancia de Información
+
+```{r}
+modelo3 <- rpart(Enfermedad_Cardíaca ~ ., data = enfermedad_train, method = "class", parms = list(split = "information"))
+```
+
+Visualizamos el árbol
+```{r}
+rpart.plot(modelo3, type = 2, extra = 104)
+```
+
+Realizamos nuestras predicciones
+```{r}
+y_pred <- predict(modelo3, newdata = enfermedad_test, type = "class")
+y_pred
+```
+
+Generamos la matriz de confusión
+```{r}
+y_real <- enfermedad_test$Enfermedad_Cardíaca
+
+conf_matrix <- confusionMatrix(data = y_pred, reference = y_real, positive = "Con Enfermedad")
+print(conf_matrix$table)
+```
+
+Extraemos las métricas
+```{r}
+# Extraer métricas
+accuracy <- conf_matrix$overall["Accuracy"]
+precision <- conf_matrix$byClass["Precision"]
+recall <- conf_matrix$byClass["Recall"]
+f1 <- conf_matrix$byClass["F1"]
+
+# Imprimir métricas
+cat("Accuracy (Exactitud):", accuracy, "\n")
+cat("Precision (Precisión):", precision, "\n")
+cat("Recall (Sensibilidad):", recall, "\n")
+cat("F1 Score:", f1, "\n")
+```
+
+## Validación Cruzada
+
+Ajustamos el modelo con un cp bajo de 0.001 y 10 folds (divisiones), activamos validación cruzada.
+```{r}
+modelo4 <- rpart(Enfermedad_Cardíaca ~ ., data = enfermedad_train, method = "class", control = rpart.control(cp = 0.001, xval = 10))
+```
+
+Revisamos la tabla de complejidad del modelo.
+```{r}
+printcp(modelo4)
+```
+Visualizamos el árbol
+```{r}
+rpart.plot(modelo4, type = 2, extra = 104)
+```
+
+Realizamos nuestras predicciones
+```{r}
+y_pred <- predict(modelo4, newdata = enfermedad_test, type = "class")
+y_pred
+```
+
+Generamos la matriz de confusión
+```{r}
+y_real <- enfermedad_test$Enfermedad_Cardíaca
+
+conf_matrix <- confusionMatrix(data = y_pred, reference = y_real, positive = "Con Enfermedad")
+print(conf_matrix$table)
+```
+
+Extraemos las métricas
+```{r}
+# Extraer métricas
+accuracy <- conf_matrix$overall["Accuracy"]
+precision <- conf_matrix$byClass["Precision"]
+recall <- conf_matrix$byClass["Recall"]
+f1 <- conf_matrix$byClass["F1"]
+
+# Imprimir métricas
+cat("Accuracy (Exactitud):", accuracy, "\n")
+cat("Precision (Precisión):", precision, "\n")
+cat("Recall (Sensibilidad):", recall, "\n")
+cat("F1 Score:", f1, "\n")
+```
+
+## Árbol Podado
+
+Podamos el árbol al mejor cp 
+```{r}
+mejor_cp <- modelo4$cptable[which.min(modelo4$cptable[, "xerror"]), "CP"]
+modelo4_podado <- prune(modelo4, cp = mejor_cp)
+```
+
+Visualizamos el árbol despúes de la poda
+```{r}
+rpart.plot(modelo4_podado, type = 2, extra = 104)
+```
+
+Realizamos nuestras predicciones
+```{r}
+y_pred <- predict(modelo4_podado, newdata = enfermedad_test, type = "class")
+y_pred
+```
+
+Generamos la matriz de confusión
+```{r}
+y_real <- enfermedad_test$Enfermedad_Cardíaca
+
+conf_matrix <- confusionMatrix(data = y_pred, reference = y_real, positive = "Con Enfermedad")
+print(conf_matrix$table)
+```
+
+Extraemos las métricas
+```{r}
+# Extraer métricas
+accuracy <- conf_matrix$overall["Accuracy"]
+precision <- conf_matrix$byClass["Precision"]
+recall <- conf_matrix$byClass["Recall"]
+f1 <- conf_matrix$byClass["F1"]
+
+# Imprimir métricas
+cat("Accuracy (Exactitud):", accuracy, "\n")
+cat("Precision (Precisión):", precision, "\n")
+cat("Recall (Sensibilidad):", recall, "\n")
+cat("F1 Score:", f1, "\n")
+```
+
+## Elección del Mejor Árbol
+
+$$
+\begin{array}{|l|c|c|c|}
+\hline
+\textbf{Métrica} & \textbf{Índice de Gini} & \textbf{Máximo de Niveles} & \textbf{Ganancia Información} & \textbf{Validación Cruzada} & \textbf{Podado} \\
+\hline
+\text{Verdaderos Negativos (TN)} & 62 & 64 & 69 & 68  & 62 \\
+\text{Falsos Positivos (FP)}     & 7 & 11 & 12 & 8 & 7 \\
+\text{Falsos Negativos (FN)}     & 26 & 24 & 19 & 20 & 26 \\
+\text{Verdaderos Positivos (TP)} & 87 & 83 & 82 & 86 & 87\\
+\text{Exactitud (Accuracy)}      & 81.86\% & 80.76\% & 82.96\% & 84.61\% & 81.86\% \\
+\text{Precisión (Precision)}     & 76.99\% & 77.57\% & 81.18\% & 81.13\% & 76.99\% \\
+\text{Sensibilidad (Recall)}     & 92.55\% & 88.29\% & 87.23\% & 91.48\% & 92.55\% \\
+\text{F1 Score}                  & 84.05\% & 82.85\% & 84.1\% & 86\% & 84.05\% \\
+\hline
+\end{array}
+$$
+
+**Elección del mejor modelo.**
+
+Validación Cruzada:
+
+- Exactitud (84.61%): La más alta entre todos los modelos.
+
+- Precisión (81.13%): Segunda más alta, cercana al modelo de "Ganancia Información".
+
+- Sensibilidad (91.48%): Muy alta, solo superada por los modelos de "Índice de Gini" y "Podado".
+
+- F1 Score (86%): El más alto, lo que indica un buen equilibrio entre precisión y sensibilidad.
+
+Ganancia Información:
+
+- Buen desempeño en exactitud (82.96%) y F1 Score (84.1%), pero con menor sensibilidad (87.23%) comparado con la validación cruzada.
+
+Índice de Gini y Podado:
+
+- Alta sensibilidad (92.55%), pero menor precisión (76.99%) y exactitud (81.86%). Esto sugiere que pueden estar sobreajustados o favorecer falsos positivos.
+
+Se puede concluir que el modelo de **Árbol Podado** es el mejor debido al valor más alto que maneja en el Recall de 92.55% que va alineado con los objetivos del análisis.
+
+## Mejor Árbol
+
+Podamos el árbol al mejor cp 
+
+```{r}
+mejor_cp <- modelo4$cptable[which.min(modelo4$cptable[, "xerror"]), "CP"]
+modelo4_podado <- prune(modelo4, cp = mejor_cp)
+mejor_cp
+```
+
+Visualizamos el árbol despúes de la poda
+```{r}
+rpart.plot(modelo4_podado, type = 2, extra = 104)
+```
+
+
+ - cp: Parámetro de complejidad; su función es determinar que tan buena debe ser una división para que el algoritmo decida realizarla
+ - nsplit: Divisiones en el árbol, nsplit=0 es el nodo raíz
+ - rel error: Error relativo despecto al error del nodo raíz
+ - xerror: Desviación estándar del error de validación cruzada. Ayuda a evaluar la estabilidad del modelo.
+
+  -  El mejor cp es el que tiene el xerror más bajo, en este caso  0.32919, un cp de 0.0046584 y 6 divisiones
+  
+El árbol está dividido en dos ramas principales según la variable Pendiente_ST, que son la subida o bajada del electrocardiograma, de ahí, cada rama se subdivide según otras variables médicas, como el colesterol, dolor de pecho, anginas y frecuencia.
+
+La predicción del nodo terminal es si el paciente está enfermo o no, el porcentaje indica los casos en ese nodo que tienen alguna enfermedad cardiaca y también se presenta la proporción total de pacientes que caen en ese nodo
+
+Ejemplo de interpretación: Supongamos que un paciente tiene:
+
+- Pendiente_ST = Up
+
+- Colesterol >= 43
+
+- Dolor_Pecho = ASY
+
+- Angina_Ejercicio = No
+
+→ Este paciente terminaría en un nodo hoja que predice "Sin Enfermedad" con una precisión del 80% y representa al 9% de los casos.
+
+Notemos que Pendiente_ST es la variable más importante (raíz del árbol): indica su alta relevancia en la predicción.
+
+En la rama derecha (Down, Flat):
+La Frecuencia Máxima y el Dolor de Pecho tienen un papel relevante en la predicción.
+
+Realizamos nuestras predicciones
+```{r}
+y_pred <- predict(modelo4_podado, newdata = enfermedad_test, type = "class")
+y_pred
+```
+
+Generamos la matriz de confusión
+```{r}
+y_real <- enfermedad_test$Enfermedad_Cardíaca
+
+conf_matrix <- confusionMatrix(data = y_pred, reference = y_real, positive = "Con Enfermedad")
+print(conf_matrix$table)
+```
+
+```{r}
+cm_table <- as.data.frame(conf_matrix$table)
+
+# Invertir el orden de los niveles del eje Y
+cm_table$Prediction <- factor(cm_table$Prediction, levels = rev(levels(cm_table$Prediction)))
+
+ggplot(cm_table, aes(x = Reference, y = Prediction, fill = Freq)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), color = "white", size = 6, fontface = "bold") +
+  scale_fill_gradient(low = "lightblue", high = "darkblue",name="Frecuencia") +
+  labs(
+    title = "MATRIZ DE CONFUSIÓN",
+    x = "Valor Real",
+    y = "Predicción"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+    axis.text = element_text(size = 12,face="bold"),
+    axis.title = element_text(size = 12,face="bold")
+  )
+```
+
+  - Verdaderos negativos (TN = 62): El modelo clasificó correctamente a 62 personas como no enfermas, y efectivamente no tienen una enfermedad cardiaca.
+  
+  - Verdaderos positivos (TP = 87): El modelo clasificó correctamente a 87 personas como enfermas, y en realidad sí tienen una enfermedad cardiaca.
+  
+  - Falsos negativos (FN = 7): El modelo no detectó enfermedad en 7 personas, pero en realidad sí lo estaban. Esto es delicado en un problema médico, pues son pacientes con alguna enfermedad cardiaca no detectados por el modelo.
+  
+  - Falsos positivos (FP = 26): El modelo clasificó incorrectamente a 26 personas como si tuvieran alguna enfermedad cardiaca, cuando en realidad no la tienen.
+
+
+Extraemos las métricas
+```{r}
+# Extraer métricas
+accuracy <- conf_matrix$overall["Accuracy"]
+precision <- conf_matrix$byClass["Precision"]
+recall <- conf_matrix$byClass["Recall"]
+f1 <- conf_matrix$byClass["F1"]
+
+# Imprimir métricas
+cat("Accuracy (Exactitud):", accuracy, "\n")
+cat("Precision (Precisión):", precision, "\n")
+cat("Recall (Sensibilidad):", recall, "\n")
+cat("F1 Score:", f1, "\n")
+```
+- Accuracy (Exactitud): El 81.86% de las predicciones fueron correctas.
+- Precision (Precisión): El 76.99% de las veces que se predijo "Con Enfermedad", realmente era cierto.
+- Recall (Sensibilidad): El modelo identifica correctamente el 92.55% de los pacientes que realmente tienen enfermedad.
+- F1 Score: Es el promedio armónico entre precisión y recall, debido a que la precisión es un valor más bajo al ponderar quedó en 84.05% reflejando ciertos detalles para los falsos positivos.
+
+
+# BOSQUE ALEATORIO
+
+## Hiperparámetros
+
+**Número de Árboles*
+```{r}
+set.seed(123)
+# Crear vector con diferentes números de árboles
+n_pacientes <- seq(10, 300, by = 10)
+
+# Vector vacío para almacenar F1 Score
+f1_scores <- c()
+
+# Entrenar bosques y calcular F1 para cada uno
+for (n in n_pacientes) {
+  cat("Entrenando con", n, "árboles...\n")
+  
+  bosque <- randomForest(Enfermedad_Cardíaca ~ ., data = enfermedad_train, ntree = n, importance = T, keep.inbag = T, oob.prox = T) 
+  
+  # Obtener predicciones OOB
+  predicciones_oob <- predict(bosque, type = "response")
+  
+  # Calcular F1 
+  f1 <- F1_Score(y_true = enfermedad_train$Enfermedad_Cardíaca, y_pred = predicciones_oob, positive = "Con Enfermedad")
+  f1_scores <- c(f1_scores, f1)
+}
+```
+
+```{r,warning=FALSE}
+# Graficar F1 vs. número de árboles
+df_f1 <- data.frame(n_pacientes, f1_scores)
+
+ggplot(df_f1, aes(x = n_pacientes, y = f1_scores)) +
+  geom_line(color = "blue3", linewidth = 1.2) +
+  geom_point(color = "red", linewidth = 3) +
+  labs(x = "Número de árboles", y = "Puntaje F1", title = "Impacto del número de árboles en el F1-score") +
+  theme_minimal()
+
+# Buscamos el F1 más alto
+```
+
+Podríamos decir que más árboles deberían ser capaces de producir un resultado más generalizado, pero al elegir un mayor número de árboles, la complejidad temporal del modelo también aumenta. En este gráfico, podemos ver claramente que el rendimiento del modelo aumenta drásticamente y luego se estanca en cierto nivel. Esto significa que elegir un gran número de estimadores en un modelo de bosque aleatorio no es la mejor idea. Si bien esto no degrada el modelo, puede ahorrarse complejidad computacional y una sobrecarga a la computadora. Notemos que con 240 árboles es suficiente para este modelo.
+```{r}
+df_f1$n_pacientes[df_f1$f1_scores==max(df_f1$f1_scores)]
+```
+
+**Número de Nodos Terminales**
+
+```{r}
+set.seed(123)
+# Definir los valores de max_depth
+max_profundidad <- seq(2, 60, by = 2)
+f1_scores <- c()
+
+# Iterar sobre cada valor de max_depth
+for (max_depth in max_profundidad) {
+  cat("Entrenando con max_depth =", max_depth, "...\n")
+  
+  # Entrenar el modelo con el valor de max_depth
+  bosque <- randomForest(Enfermedad_Cardíaca ~ ., data = enfermedad_train, ntree = 240, maxnodes = max_depth, importance = T, keep.inbag = T, oob.prox = T)
+  
+  # Obtener las predicciones fuera de bolsa
+  predicciones_oob <- predict(bosque, type = "response")
+  
+  # Calcular la matriz de confusión
+  conf_matrix <- confusionMatrix(predicciones_oob, enfermedad_train$Enfermedad_Cardíaca, positive = "Con Enfermedad")
+  
+  # Extraer el F1-score de la matriz de confusión
+  f1_scores <- c(f1_scores, conf_matrix$byClass["F1"])
+}
+```
+
+```{r,warning=FALSE,message=FALSE}
+# Graficar F1 vs. número de árboles
+df_f2 <- data.frame(max_profundidad, f1_scores)
+
+ggplot(df_f2, aes(x = max_profundidad, y = f1_scores)) +
+  geom_line(color = "blue3", size = 1.2) +
+  geom_point(color = "red", size = 3) +
+  labs(x = "Máxima Profundidad", y = "Puntaje F1", title = "Impacto de max_depth en el F1-score") +
+  theme_minimal()
+```
+
+
+La profundidad máxima de un árbol en Random Forest se define como la ruta más larga entre el nodo raíz y el nodo hoja; en este gráfico, podemos ver claramente que, a medida que aumenta la profundidad máxima del árbol de decisión, el rendimiento del modelo en el conjunto de entrenamiento aumenta continuamente. Por otro lado, a medida que aumenta el valor de max_depth, el rendimiento en el conjunto de prueba aumenta inicialmente, pero a partir de cierto punto, comienza a disminuir periódicamente. La profundidad max es de 56.
+```{r}
+df_f2$max_profundidad[df_f2$f1_scores==max(df_f2$f1_scores)]
+```
+**Máximo de Características**
+
+```{r}
+set.seed(123)
+# Definir el rango de max_features
+max_variables <- 1:(ncol(enfermedad_train) - 1)  # -1 para excluir la columna de respuesta
+
+# Inicializar un vector para almacenar los F1-scores
+f1_scores <- c()
+
+# Entrenar el modelo con diferentes valores de max_features
+for (max_features in max_variables) {
+  cat("Entrenando con max_features =", max_features, "...\n")
+  
+  # Entrenar el randomForest con el valor de max_features
+  bosque <- randomForest(Enfermedad_Cardíaca ~ ., data = enfermedad_train, ntree = 240, mtry = max_features, importance = T, keep.inbag = T, oob.prox = T)
+  
+  # Obtener las predicciones OOB
+  predicciones_oob <- predict(bosque, type = "response")
+  
+  # Calcular la matriz de confusión
+  conf_matrix <- confusionMatrix(predicciones_oob, enfermedad_train$Enfermedad_Cardíaca, positive = "Con Enfermedad")
+  
+  # Calcular el F1-score
+  f1_scores <- c(f1_scores, conf_matrix$byClass["F1"])
+}
+```
+
+```{r}
+# Crear un data frame para graficar
+df_f3 <- data.frame(max_features = max_variables, f1_score = f1_scores)
+
+# Graficar F1-score vs max_features
+ggplot(df_f3, aes(x = max_features, y = f1_score)) +
+  geom_line(color = "blue", lwd = 1.2) +
+  geom_point(color = "red", size = 3) +
+  labs(x = "Máximo número de características", y = "F1-score", title = "Impacto de max_features en el F1-score") +
+  theme_minimal()
+```
+
+El número máximo de características proporcionadas a cada árbol en un bosque aleatorio. Sabemos que el bosque aleatorio selecciona muestras aleatorias de las características para encontrar la mejor distribución. Podemos observar que el rendimiento del modelo aumenta inicialmente a medida que aumenta el número de características máximas. Sin embargo, a partir de 3 características, la puntuación de prueba se satura e incluso comienza a disminuir hacia el final, lo que claramente indica que el modelo comienza a sobreajustarse. Con 2 características son más que suficientes, es recomendable considerar el valor predeterminado de este parámetro, que se establece como la raíz cuadrada del número de características presentes en el conjunto de datos.
+
+```{r}
+df_f3$max_features[df_f3$f1_score==max(df_f3$f1_score)]
+```
+
+## Construcción del Modelo
+
+Una vez tenemos las características necesarias para realizar el modelo de forma óptima, procedemos con él.
+
+```{r}
+set.seed(123)
+modelo1 <- randomForest(Enfermedad_Cardíaca ~ ., data = enfermedad_train,ntree=240,mtry=2,maxnodes=56) # Por defecto lo hace con gini
+```
+
+```{r}
+# Error OOB (ya viene incluido en el modelo)
+modelo1$err.rate
+
+exactitud_oob <- 1 - modelo1$err.rate[which.min(modelo1$err.rate[,"OOB"])]
+cat("La exactitud OOB es:", round(exactitud_oob * 100, 1), "%\n")
+```
+
+  - Conforme se agregan más árboles, el bosque mejora su capacidad de generalización, aprox. después del arbol 148, el error OOB (porcentaje de predicciones correctas sobre el los datos OOB) se estabiliza y deja de mejorar, usualmente oscilando el 0.125000.
+  
+  - Una OOB accuracy del 88% quiere decir que el modelo predice correctamente el diagnóstico (enfermedad cardiaca o no) en el 88% de los casos del conjunto de datos fuera de entrenamiento.
+
+```{r}
+head(modelo1$votes)
+tail(modelo1$votes)
+```
+
+- Notemos que las clasificaciones son consistentes y no hay sesgo respecto al como se clasifica el estado del paciente.
+
+**Realizamos las predicciones**
+```{r}
+# Predicciones OOB
+predicciones_oob <- modelo1$predicted
+```
+
+## Matriz de Confusión
+```{r}
+reales <- enfermedad_train$Enfermedad_Cardíaca # Valores reales
+# Matriz de confusión
+conf_matrix <- confusionMatrix(data = predicciones_oob, reference = reales, positive = "Con Enfermedad")
+print(conf_matrix$table)
+```
+```{r}
+cm_table <- as.data.frame(conf_matrix$table)
+
+# Invertir el orden de los niveles del eje Y
+cm_table$Prediction <- factor(cm_table$Prediction, levels = rev(levels(cm_table$Prediction)))
+
+ggplot(cm_table, aes(x = Reference, y = Prediction, fill = Freq)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), color = "white", size = 6, fontface = "bold") +
+  scale_fill_gradient(low = "lightblue", high = "darkblue",name="Frecuencia") +
+  labs(
+    title = "MATRIZ DE CONFUSIÓN",
+    x = "Valor Real",
+    y = "Predicción"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 18, face = "bold"),
+    axis.text = element_text(size = 12,face="bold"),
+    axis.title = element_text(size = 12,face="bold")
+  )
+```
+
+- Verdaderos negativos (TN = 265): El modelo clasificó correctamente a 266 personas como no enfermas, y efectivamente no tienen una enfermedad cardiaca.
+  
+  - Verdaderos positivos (TP = 377): El modelo clasificó correctamente a 378 personas como enfermas, y en realidad sí tienen una enfermedad cardiaca.
+  
+  - Falsos negativos (FN = 37): El modelo no detectó enfermedad en 36 personas, pero en realidad sí lo estaban. Esto es delicado en un problema médico, pues son pacientes con alguna enfermedad cardiaca no detectados por el modelo.
+  
+  - Falsos positivos (FP = 57): El modelo clasificó incorrectamente a 56 personas como si tuvieran alguna enfermedad cardiaca, cuando en realidad no la tienen.
+
+
+**Métricas**
+
+```{r}
+# Extraer métricas
+accuracy <- conf_matrix$overall["Accuracy"]
+precision <- conf_matrix$byClass["Precision"]
+recall <- conf_matrix$byClass["Recall"]
+f1 <- conf_matrix$byClass["F1"]
+
+# Mostrar resultados
+cat("Accuracy (Exactitud):", accuracy, "\n")
+cat("Precision (Precisión): ", round(precision, 4), "\n")
+cat("Recall (Sensibilidad): ", round(recall, 4), "\n")
+cat("Puntaje F1: ", round(f1, 4), "\n")
+```
+
+- Accuracy (Exactitud) = 87.22%: El 86.95% de todas las predicciones del modelo fueron correctas, tanto para personas con una enfermedad cardiaca como sin ella.
+  
+  - Precision (Precisión) = 86.87%: De todas las personas que el modelo clasificó como enfermas, el 86.87% realmente lo eran. Esta métrica es importante para evitar falsos positivos, es decir, no generar diagnósticos erróneos en personas sanas.
+  
+  - Recall (Sensibilidad) = 91.06%: El modelo fue capaz de detectar correctamente el 91.06% de los verdaderos casos de enfermedad cardiaca. Esta métrica es clave en el área médica, porque queremos identificar a la mayor cantidad de pacientes enfermos posible. Aprox un 10% de los casos no fueron detectados (falsos negativos).
+  
+  - F1 Score = 88.92%: Este es un balance entre precisión y recall. Un F1 alto indica que el modelo tiene un buen compromiso entre detectar correctamente a quienes están enfermos y no clasificar erróneamente a quienes no lo están.
+
+# CONCLUSIONES
+
+## Comparación de Modelos
+
+En la siguiente tabla se puede observar los valores de la matriz de confusión, métricas más importantes y las ventajas o limitaciones que presenta cada uno de los 4 modelos finales que se utilizaron para clasificar a los pacientes que sí presentan la enfermedad cardíaca, esto nos ayudará a elegir el modelo que mejor se ajusta a los objetivos iniciales.
+
+$$
+\begin{array}{|c|c|c|c|}
+\hline
+\textbf{Métrica} & \textbf{Logístico} & \textbf{QDA} & \textbf{Árbol de Decisión} & \textbf{Bosque Aleatorio} \\
+\hline
+\text{Verdaderos Negativos (TN)} & 86 & 84 & 87 & 377 \\
+\text{Falsos Positivos (FP)}     & 17 & 16 & 26 & 57 \\
+\text{Falsos Negativos (FN)}     & 8  & 10 & 7  & 37 \\
+\text{Verdaderos Positivos (TP)} & 71 & 72 & 62 & 265 \\
+\text{Exactitud (Accuracy)}      & 86.26\% & 85.71\% & 81.86\% & 87.22\% \\
+\text{Precisión (Precision)}     & 83.49\% & 84\%  & 76.99\% & 86.87\%  \\
+\text{Sensibilidad (Recall)}     & 91.48\% & 89.36\%  & 92.55\% & 91.06\%  \\
+\text{F1 Score}                  & 87.30\% & 86.59\%  & 84.05\%  & 88.92\%   \\
+\text{Ventajas}                  & \text{Interpretación de Variables} & \text{Equilibrado} & \text{Mejor Recall} & \text{Superior en Métricas}  \\
+\text{Limitaciones}              & \text{Suponer relación lineal} & \text{Supuestos}  & \text{Errores (falsos positivos)} & \text{Visualización y Costo}  \\
+\hline
+\end{array}
+$$
+
+## Selección del Mejor Modelo
+
+Tras evaluar múltiples enfoques predictivos sobre el diagnóstico de enfermedad cardíaca, se concluye lo siguiente:
+El Bosque Aleatorio demostró ser el modelo con mejor rendimiento global, destacando en precisión, sensibilidad y F1 Score. Su capacidad para manejar relaciones no lineales, interacciones complejas y su resistencia al sobreajuste lo hacen ideal para aplicaciones clínicas automatizadas.
+La Regresión Logística es una excelente alternativa cuando se prioriza la interpretabilidad y el análisis de factores clínicos individuales. Aunque su desempeño fue ligeramente inferior al Random Forest, su facilidad de implementación y explicación la hacen muy valiosa en la práctica médica.
+Los modelos basados en Árboles de Decisión, en especial el con validación cruzada, mostraron un buen equilibrio entre interpretabilidad y rendimiento. Son ideales cuando se busca visualizar el proceso de decisión, aunque con menor precisión que los modelos de ensamble.
+El QDA funcionó bien, pero su uso está condicionado al cumplimiento de supuestos estadísticos (normalidad y heterocedasticidad), lo que puede limitar su aplicabilidad en datos reales clínicos.
+En síntesis, aunque todos los modelos ofrecieron buenos resultados, el Bosque Aleatorio representa la mejor combinación de sensibilidad, precisión y robustez, especialmente importante en contextos donde los errores de diagnóstico pueden tener consecuencias graves.
+
+## Conclusiones y Recomendaciones
+
+Este trabajo representó una oportunidad valiosa para integrar conocimientos estadísticos, clínicos y computacionales en el análisis predictivo de una problemática médica relevante como es la enfermedad cardíaca. A través de las distintas etapas del proyecto desde la limpieza y exploración de los datos hasta la evaluación de modelos predictivos fue posible comprender cómo las técnicas estadísticas y de aprendizaje automático pueden aportar significativamente en contextos reales, donde las decisiones tienen impacto directo sobre la salud de las personas.
+El proceso permitió observar que, más allá de la aplicación técnica de los modelos, es fundamental contar con una base de datos bien estructurada y clínicamente coherente. El análisis cuidadoso de las variables, el tratamiento adecuado de las transformaciones y la validación del comportamiento de los algoritmos fueron aspectos centrales para asegurar la confiabilidad de los resultados. También se hizo evidente que la elección de un modelo no puede basarse únicamente en métricas de desempeño: la interpretabilidad, la robustez frente al ruido, la facilidad de implementación y el contexto de uso deben ser considerados al momento de seleccionar una herramienta predictiva.
+En conjunto, este estudio refleja cómo la estadística , aplicada de manera crítica y contextualizada, puede apoyar de forma efectiva el diagnóstico clínico. La tecnología no reemplaza al criterio médico, pero sí lo complementa, ofreciendo una visión basada en evidencia y datos objetivos. A medida que estas herramientas se integren más en el ámbito de la salud, será clave mantener una mirada ética, crítica y orientada al beneficio del paciente.
