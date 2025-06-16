@@ -1,0 +1,2249 @@
+---
+title: "PROYECTO 3"
+subtitle: "Equipo 12"
+author:
+  - Emmanuel Bonilla Flores
+  - Marcos García Morales
+  - Alberto Hernández Galicia
+  - Eduardo Tomás Leyva Díaz
+output:
+  pdf_document: 
+    latex_engine: xelatex
+---
+
+# LIBRERÍAS
+
+Antes de iniciar se deben activar todas las librerías que se utilizarán para llevar a cabo este proyecto.
+
+```{r,warning=FALSE,message=FALSE}
+library(quantmod)      # Datos de Yahoo
+library(goftest)
+library(ggplot2)       # Gráficos
+library(tidyr)         # Eliminar NA´s
+library(dplyr)         # Data Frames
+library(corrplot)      # Correlación
+library(fitdistrplus)  # Estimar Parámetros
+library(patchwork)     # Gráficos
+library(VGAM)          # Distribución de Laplace o Doble Exponencial
+library(moments)       # Curtosis
+library(purrr)         # Pegar Data frames
+library(rlang)
+library(nortest)       # Test Normalidad
+library(knitr)
+library(caret)         # Matriz de Confusión
+library(pROC)          # CurvaROC
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+# EMISORAS
+
+Se eligió una cartera con acciones de 20 emisoras que pertenecen al índice **S&P500** que operan en diferentes sectores de Estados Unidos, además de tomar en cuenta el periodo que va desde enero del 2022 a marzo del 2025, estas son:
+
+```{r}
+# Acciones S&P500
+cartera<-c("ABT","AMD","GOOGL", "AMZN","AXP","AVGO","CAT","CB","COST","XOM",
+           "HD","INTC","JPM","META","NFLX","NVDA","ORCL","PFE","TMUS","WMT")
+getSymbols(cartera,src="yahoo",from="2022-01-01",to="2025-03-31")
+```
+Los datos del **Precio de Cierre** se resumen en la siguiente tabla:
+
+```{r}
+# Colocar todos los Precios de Cierre en un Data Frame
+precios_cierre<-function(simbolo){
+  fechas<-index(Cl(get(simbolo)))
+  cierre<-as.data.frame(Cl(get(simbolo)))
+  colnames(cierre)<-simbolo
+  return(cierre)
+}
+precios<-data.frame(map_dfc(cartera,precios_cierre))
+kable(head(precios[,1:7],8),align = "ccccccc",digits =2)
+kable(head(precios[,8:14],8),align = "ccccccc",digits =2)
+kable(head(precios[,15:20],8),align = "ccccccc",digits =2)
+```
+\newpage
+
+# ANÁLISIS EXPLORATORIO
+
+La primera parte consiste en realizar un pequeño análisis del precio para ver cómo se ha comportado durante el periodo de análisis, para esto se va a generar una **Gráfica de Línea** donde se aprecian las subidas y bajadas.
+```{r,fig.width=20,fig.height=20,out.width='100%'}
+par(mfrow = c(5, 4))  # 5 filas x 4 columnas
+for(i in colnames(precios)){
+  plot(precios[[i]],type="l",col="purple3",lwd=1.75,xlab="Días",ylab="Precio",
+       main = paste("PRECIO DE", i))
+}
+```
+
+\newpage
+
+*Observamos que en su mayoría, los precios de las acciones subieron considerablemente, las únicas excepciones son Intel y Pfizer, Home Depot también es un caso interesante, ya que tuvo varios altibajos que dañan el avance que han tenido durante este periodo de tiempo. Se destacan acciones como American Express, Broadcom, Meta, Netflix y Nvidia que han tenido los años más productivos, con aprox. un 180% de rendimiento promedio. También hay acciones que encajan en varias formas de inversión, a largo plazo como JP Morgan o en compra-venta continua como Exxon Movil.*
+
+
+Además, se va a añadir un gráfico de **Caja y Bigotes** que permite visualizar valores atípicos u outliers.
+```{r,fig.width=20,fig.height=20,out.width='100%'}
+par(mfrow = c(5, 4))  # 5 filas x 4 columnas
+for(i in colnames(precios)){
+  boxplot(precios[[i]],col="brown", main = paste("Boxplot", i),ylab="Precio")
+}
+```
+
+\newpage
+
+*Vemos una gran variedad en los boxplot, hay presencia de outliers en Abbott Laboratories, T-Mobile, Walmart y Exxon, curiosamente, estos son los boxplots con la estructura más común, cajas de buen tamaño y una mediana cercana al primer cuartil, lo que implica sesgadez a la izquierda, algo común para el contexto de este proyecto; por otro lado, las acciones con mayor rendimiento tienen una caja demasiado grande con una carga de datos notables al bigote superior, lo que indica el crecimiento que han tenido, es decir, un sesgo positivo y asimetría de cola derecha larga.*
+
+Por último se presenta un pequeño resumen de estadística descriptiva con las medidas más importantes para entender el rango de valores que toma cada acción.
+```{r}
+# RESUMEN ESTADÍSTICO
+precios %>% 
+  summarise(across(everything(), list(
+    Min = min,Q1=~quantile(.x,0.25),Mediana = median, Media = mean,
+    Q3=~quantile(.x,0.75), Max = max, SD = sd
+  ))) %>%
+  tidyr::pivot_longer(everything(),
+                      names_to = c("Emisora", ".value"),
+                      names_sep = "_") %>% kable(align="cccccccc",digits=2)
+```
+
+*Existen varias diferencias notables entre las acciones, esto nos ayudará a comparar el comportamiento histórico de precios entre las emisoras o identificar la volatilidad; la emisora con el precio mínimo más bajo es Nvidia ($11.23), que comparando su precio actual se refleja el rendimiento que ha tenido, esto también se refleja al tener la mayor diferencia entre su mediana y media. Por otra parte, Costco es la emisora con el precio máximo más alto ($1076) por acción, esto afecta en las demás métricas, ya que Costco es la emisora con los valores más altos en todas las métricas. Las emisoras más volátiles son Netflix y Meta, con 222 y 170 respectivamente en su sd, mientras que las más estables son Abbott y Exxon con 9 y 12 respectivamente. Los datos muestras una gran variedad de conclusiones las cuales pueden ajustarse a la elección de inversión, tolerancia al riesgo, patrones en el comportamiento de las emisoras y evaluar las oportunidades de compra o venta.*
+
+\newpage
+
+# RENDIMIENTOS
+
+Después se van a calcular los rendimientos de manera discreta al tratarse de acciones, es decir:
+$$ \mathbf{ Rendimiento = \dfrac{Precio \ Final}{Precio \ Inicial} - 1 }$$
+
+```{r}
+rendimientos<- precios %>%  mutate(across(everything(), ~ (.x / lag(.x)-1))) %>% 
+               drop_na()  # Eliminar el NA
+kable(head(rendimientos[,1:7],8),align = "ccccccc",digits=4)
+kable(head(rendimientos[,8:14],8),align = "ccccccc",digits=4)
+kable(head(rendimientos[,15:20],8),align = "ccccccc",digits=4)
+n<-nrow(rendimientos) # número de observaciones o filas
+```
+\newpage
+
+Ahora se va a generar un pequeño **histograma** para poder ver la forma de la distribución que tienen los rendimientos, lo cual nos ayudará a ver qué método es el que puede ajustar mejor y también se hará un **gráfico de líneas** con el objetivo de ver la volatilidad.
+```{r,fig.width=20,fig.height=20,out.width='100%'}
+graficos <- map(names(rendimientos), function(col) {
+  ggplot(rendimientos, aes(x = .data[[col]])) +
+    geom_histogram(bins = 30, fill = "skyblue", color = "black",lwd=0.5) +
+    theme_classic() +
+    labs(title = paste("RENDIMIENTOS",col),y="Frecuencia") +
+    theme(axis.text.x = element_blank(),
+          axis.title.x = element_blank())
+})
+wrap_plots(graficos[1:20], nrow = 5)
+```
+```{r,fig.width=20,fig.height=20,out.width='100%'}
+# GRÁFICO DE LÍNEA
+par(mfrow = c(5, 4))  # 5 filas x 4 columnas
+for(i in colnames(precios)){
+  plot(rendimientos[[i]],type="l",col="skyblue", lwd=1.5,
+       main = paste("Rendimientos", i), xlab="Días",ylab="Valores")
+}
+```
+\newpage
+
+*Todos los histogramas tienen una forma más o menos simétrica y con mayor densidad en el centro, lo que sugiere que los rendimientos siguen una distribución aproximadamente normal, recordemos que una suposición clásica en finanzas es que los rendimientos tengan distr. normal, también obs. que la mayoría de los histogramas son simétricos o casi llegan a serlo, implicando ganancias o pérdidas, principalmente AMD, Google, Nvidia y otros, presentan colas ligeramente pesadas o incluso sesgadez, lo que indica riesgo de eventos extremos, que no necesariamente son malos. Aquellas emisoras más concentradas reflejan estabilidad, tales como Oracle o Amazon, mientras que las de mayor dispersión implican volatilidad, como Meta o Google.*
+
+*En general los rendimientos no muestran una tendencia creciente ni decreciente clara, a excepción de casos extremos como Netflix o Nvidia; la mayoría oscila en un valor cercano a cero, algo común de ver en las series de tiempo, así mismo, se observan muchas rachas de alta y baja volatilidad, implicando presencia de ARCH/GARCH, esto es más evidente en acciones como AMD, Amazon, Broadcom, Caterpillar, etc. También se pueden discernir outliers en algunas emisoras, como en Broadcom, Intel, Nvidia o Netflix, estos son picos tanto positivos como negativos.*
+
+\newpage
+
+# CORRELACIÓN
+
+Es importante analizar si los rendimientos están relacionados de alguna manera debido a que si una emisora sufre cambios importantes en el precio de sus acciones puede afectar significativamente las ganancias en el portafolio. La relación entre acciones se puede llevar a cabo de dos formas:
+
+- Relación Negativa: Ayuda a mitigar pérdidas porque mientras una acción cae otra puede subir, de modo que se compensa el efecto generado por el cambio en el precio.
+
+- Relación Positiva: Esto ayuda a incrementar las ganancias ya que si una acción sube y otra presenta el mismo comportamiento ante el cambio del precio hará el valor del dinero invertido en estos activos también suba.
+
+Para verificar esto se va a construir la matriz de correlación de los rendimientos y también un mapa de calor para interpretarlo con mayor facilidad.
+
+```{r,fig.align='center',fig.height=4.2,fig.width=5.6}
+matriz_correlacion<-cor(rendimientos)
+corrplot(matriz_correlacion,type="upper")
+```
+
+*No es posible discernir ninguna correlación negativa, esto se debe a la gran cantidad de emisoras en el sector de la tecnología o afines, como Nvidia, Broadcom, AMD, Intel, estas emisoras venden sus productos a otras compañías, lo que refleja la correlación entre compañías que a simple vista no tienen relación, por poner un ejemplo, Nvidia vende componentes a Amazon, Broadcom, Google, etc. Por otro lado, las compañías con un sector muy distinto, no presenta correlación notable, Caterpillas, Walmart o Costco (que sólo presentan correlación entre ellas debido a su mercado), T-Mobile o Pfizer.*
+
+\newpage
+
+# MODELOS NO PARAMÉTRICOS
+
+Se caracterizan por obtener los rendimientos discretos o continuos (dependiendo la naturaleza del mercado y del activo) que dan pie a la construcción de una **Función de Pérdidas y Ganancias**. Para esto se puede manejar que los rendimientos cumplen diferentes supuestos como la curtosis o la normalidad, además de usar técnicas de convergencia para los resultados finales como lo es la **Simulación Montecarlo**. El objetivo consiste en obtener un percentil de esa función para un nivel de confianza, su interpetación es que es la pérdida máxima que puede ocurrir en un horizonte de tiempo, lo que se conoce como el **VaR (Value at Risk)**. Para complementar esta idea también se llevará a cabo un proceso en donde se va a obtener el valor de la pérdida promedio asumiendo que ya se rebasó este resultado del VaR, esto hace referencia al **ES(Expected Shortfall)**. A partir de aquí se dará paso al cálculo del VaR con los modelos no paramétricos, los cuales son:
+
+- Simulación Histórica
+
+- Simulación Montecarlo
+
+- Simulación Montecarlo Laplace
+
+- Simulación Montecarlo 
+
+- Simulación Bootstrapping
+
+- Alisado Exponencial 
+
+\newpage
+
+## SIMULACIÓN HISTÓRICA
+
+En este método lo que se hace es que a partir de los rendimientos históricos que ya se calcularon se hace una **Revaluación** del activo,  y después se calcula la función de **Pérdidas o Ganancias (PL)**, es decir:
+
+$$\mathbf{Revaluación=Último \ Precio * (1 + Rend)}$$
+
+$$\mathbf{PL = Último \ Precio - Revaluación }$$
+
+```{r}
+# SIMULACIÓN HISTÓRICA
+SH<-function(df){
+  revaluacion<- df %>% mutate(across(everything(), ~ (tail(precios$.x,1)*(1+.x))))
+  PL<- revaluacion %>% mutate(across(everything(),~(tail(precios$.x,1)-.x)))
+  PL<- PL %>% mutate(Portafolio = rowSums(across(everything())))
+  
+  return(PL)
+}
+simulacion_histórica<-SH(rendimientos)
+kable(head(simulacion_histórica[,1:7],7),align = "ccccccc",digits=5)
+kable(head(simulacion_histórica[,8:14],7),align = "ccccccc",digits=5)
+kable(head(simulacion_histórica[,15:21],7),align = "ccccccc",digits=5)
+```
+El **VaR** es un percentil de esta distribución de Pérdidas y Ganancias dado un nivel de confianza que indica la pérdida máxima que se está dispuesto a asumir, para este caso se considerarán al $95\%, 97\% \ y \ 99\%$. 
+
+Todos estos valores del VaR que se muestran a continuación son resultados diarios, si se quiere conocer la información pero para un horizonte de tiempo en específico hay que multiplicarlo por la raíz del tiempo, mejor dicho:
+
+$$\mathbf{VaR(T \ días) = VaR(1 \ día) * \sqrt{T} }$$
+Se construyó una función que realiza el siguiente procedimiento de manera individual y también se acompaña con un ejemplo:
+
+- Obtiene los percentiles o el VaR para los niveles de confianza ya especificados.
+- Multiplica cada resultado por un vector que contiene el horizonte de tiempo.
+- Regresa el data frame que contiene todos los resultados.
+
+```{r}
+# VaR INDIVIDUAL
+# NOTA: Todos los resultados los va pegando por columnas.
+
+VaR_individual<-function(x,alpha,tiempo){
+  df<-data.frame(VaR=as.character(paste0(alpha*100,"%")))
+  # Hallar el VaR
+  percentil<-as.numeric(quantile(x,alpha))
+  # VaR para un Horizonte de tiempo
+  for(i in tiempo){
+    VaR_t<- percentil * sqrt(i)
+    col_name<- paste0(i," días")  # Nombre dinámico
+    df<- df %>% mutate(!!col_name:=VaR_t)
+  }
+  return(df)
+}
+conf<-c(0.95,0.97,0.99)     # niveles de confianza
+t<-c(1,7,15,30,60,90,180)   # tiempo
+kable(VaR_individual(simulacion_histórica$ABT,conf,t),align="cccccccc",digits=4)
+# ejemplo
+```
+Con ayuda de la paquetería *purrr* solo se aplica la función para cada emisora que ya se tenían en el data frame de la simulación histórica y al final se pegan los resultados por fila, lo cual nos permite resumir toda la información en un dataframe como el siguiente:
+```{r}
+# VAR COMPLETO
+VaR<-function(df){      # Aplicar la función a cada emisora
+  # Pegar los Resultados por fila
+  VaR_completo<- df %>% map_dfr(~VaR_individual(.,alpha=conf,tiempo=t))
+  nombres<-c()
+  for(i in colnames(df)){
+    nombres<-c(nombres,i,i,i)
+  }
+  # Colocar los nombres de las emisoras
+  VaR_completo<- VaR_completo %>% mutate(Acción=nombres) %>%
+                 relocate(Acción,.before=1)
+  return(VaR_completo)
+}
+VaR_SH<-VaR(simulacion_histórica)
+kable(VaR_SH,align = "ccccccccc",digits=4)
+```
+Para lograr visualizar lo que ocurre se realizó un histograma para cada función de Pérdidas y Ganancias donde se le agrega líneas verticales que coinciden con los niveles del VaR diario dependiendo la empresa emisora.
+```{r,results='hide'}
+histograma_VaR<-function(col_name,df){
+  d1<- VaR_SH %>% filter(Acción==col_name)
+  VaR<-d1[["1 días"]]
+  ggplot(data =df, aes(x =.data[[col_name]])) +
+    geom_histogram(fill = "skyblue", col = "black", lwd = 0.8, bins = 30)+
+    geom_vline(aes(xintercept=VaR[1],colour="VaR 95%"),lwd = 1.75)+
+    geom_vline(aes(xintercept=VaR[2],colour="VaR 97%"),lwd = 1.75)+
+    geom_vline(aes(xintercept=VaR[3],colour="VaR 99%"),lwd = 1.75)+
+    scale_color_manual(name = "Niveles de Confianza",
+    values = c("VaR 95%"="dodgerblue","VaR 97%"="steelblue4","VaR 99%"="darkblue")) +
+    labs(title=paste("PÉRDIDAS Y GANANCIAS",col_name),x="Valores",y="Frecuencia")+
+    theme_classic()+ theme(legend.position = "bottom")}
+```
+\newpage
+
+```{r,fig.width=20,fig.height=20,out.width='100%'}
+graficos_VaR<-map(names(precios),~histograma_VaR(.x,simulacion_histórica))
+wrap_plots(graficos_VaR[1:20], nrow = 5)
+```
+\newpage
+
+Cuando ya se conoce el VaR, se puede estimar la pérdida promedio dado que ya se rebasó este valor, lo que se conoce como el **Expected Shortfall (ES)** y es una cantidad que se va a obtener de manera diaria para los tres niveles de confianza que ya se establecieron.
+
+```{r}
+# EXPECTED SHORTFALL
+# Función que calcula el promedio de las pérdidas que superan cada nivel
+# del VaR
+ES<-function(col_name,data1,data2){
+  # Filtrar para conseguir los valores
+  d2<- data1 %>% filter(Acción==col_name) %>% dplyr::select(VaR,`1 días`)
+  valores<-d2[["1 días"]]
+  df<-data2[[col_name]] # Función de Pérdidas y Ganancias
+  es<-c()
+    for(i in valores){
+    es<-c(es,mean(df[df>i],na.rm=TRUE))
+    }
+  es
+  # Pegar los resultados y colocar el nombre de la emisora
+  d2<-d2 %>% mutate(ES = es) %>% mutate(Acción=rep(col_name,3)) %>%
+      relocate(Acción,.before=1)
+  return(d2)
+}
+kable(ES("GOOGL",VaR_SH,simulacion_histórica),align="ccc",digits=5) # ejemplo
+```
+Al final se hace para todas las emisoras y se presentan los resultados
+```{r}
+# ES
+ES_SH<-map_dfr(colnames(simulacion_histórica),
+              ~ES(.x,VaR_SH,simulacion_histórica))
+
+kable(ES_SH, align="cccc",digits = 5)
+```
+
+### Análisis de la Simulación Histórica
+
+La simulación histórica parte del supuesto de que los rendimientos pasados pueden repetirse en el futuro. En este método, se reordenan aleatoriamente los rendimientos observados para generar trayectorias simuladas del portafolio. Este enfoque es completamente no paramétrico, ya que no impone ninguna estructura específica de distribución sobre los datos.
+
+Este método es especialmente útil para capturar eventos extremos, ya que conserva las colas y características empíricas reales de la distribución original. Como resultado, permite estimar el Valor en Riesgo (VaR) de forma robusta y coherente con el comportamiento histórico del mercado. No requiere supuestos teóricos sobre la forma de la distribución, lo que lo convierte en una herramienta efectiva cuando se busca evaluar el riesgo en función de datos reales observados.
+
+\newpage
+
+## SIMULACIÓN MONTECARLO
+
+En este método se asume que los rendimientos siguen un **comportamiento normal**, por lo que se hará una simulación de los rendimientos a través de una distribución normal donde los parámetros de la media y desviación estándar se hallarán por el método de **máxima verosimilitud**. Una vez que ya se tiene la muestra aleatoria de los rendimientos se sigue el mismo procemiento de la Revaluación y de la función de PL para poder calcular el VaR.
+
+Todo esto se considera como un escenario nada más, así que se va a repetir para **m escenarios** con el objetivo de buscar una convergencia en los valores del VaR, así que se llevarán a cabo 5000, 10000 y 20000 simulaciones donde al final de cada una se sacará el promedio.
+
+### Test Normalidad
+
+Se llevará a cabo un pequeño test de normalidad a los rendimientos para ver si proponiendo un comportamiento normal se puede llegar a buenos resultados, y debido a que es una muestra grande se hará la **Prueba de Kologorov-Smirnov.** La función arroja un resumen muy completo, pero solo nos enfocaremos en el valor p, el cual nos interesa que salga mayor al nivel de significancia para NO rechazar la normalidad.
+
+```{r}
+# PRUEBA DE KOLMOGORV-SMIRNOV
+normalidad<-rendimientos %>%
+  summarise(across(everything(),~lillie.test(.x)$p.value))
+kable(normalidad[1:7],align="ccccccc",digits=10)
+kable(normalidad[8:14],align="ccccccc",digits=10)
+kable(normalidad[15:20],align="cccccc",digits=10)
+```
+
+*Ninguna emisora cumple la normalidad en sus datos, esto puede deberse al rendimiento que han presentado durante este periodo de tiempo, el hecho de que al ser datos "impredecibles" tengan un comportamiento irregular o la sesgadez que ya se ha señalado con anterioridad, el comportamiento del mercado o la intervención de noticias que afectaron a una emisora o al mercado en general, etc. Esto hace que en general no tenga el comportamiento de la dist. normal a pesar de que los histogramas si presenten una forma cercana a esta distribución.*
+
+\newpage
+
+### Estimación de Parámetros
+
+```{r,warning=FALSE}
+# Obtener los parámetros por máxima verosimilitud
+parametros_normal<-function(x,nombre_col){
+  mod <- fitdist(x, "norm", method = "mle")
+  media <- coef(mod)[1]
+  sigma <- coef(mod)[2]
+  df<-data.frame(c(media,sigma))
+  colnames(df)<-nombre_col
+  return(df)
+}
+parametros<-rendimientos %>% imap_dfc(~parametros_normal(.x,.y))
+kable(parametros[1:5],align="ccccc",digits=7)
+kable(parametros[6:10],align="ccccc",digits=7)
+kable(parametros[11:15],align="ccccc",digits=7)
+kable(parametros[16:20],align="ccccc",digits=7)
+```
+\newpage
+
+### Rendimientos Simulados
+
+Podemos obtener una muestra de los rendimientos simulados para cada emisora, los cuales deben mostrar el comportamiento de una normal con los parámetros que se estimaron.
+```{r,fig.width=20,fig.height=20,out.width='100%'}
+rend_normal <- function(x, nombre_col, tamaño) {
+  media<-parametros[[nombre_col]][1]
+  sigma<-parametros[[nombre_col]][2]
+  
+  muestra <- rnorm(tamaño, mean = media, sd = sigma)
+  
+  return(muestra)
+}
+rend_simulados<- rendimientos %>%  imap_dfc(~ rend_normal(.x,.y,n))
+
+histograma_rend_sim<-function(col_name,df){
+  ggplot(data =df, aes(x =.data[[col_name]])) +
+    geom_histogram(aes(y=after_stat(density)),fill = "lightcoral",
+                   col = "black", lwd = 0.8, bins = 30)+
+    geom_density(col="firebrick",lwd=5,lty=6)+
+    labs(title = paste("RENDIMIENTOS NORMALES",col_name),
+         x = "Valores", y = "Frecuencia")+
+    theme_classic()}
+
+graficos_simulados<-map(names(rend_simulados),
+                  ~histograma_rend_sim(.x,rend_simulados))
+wrap_plots(graficos_simulados[1:20], nrow = 5)
+```
+Previo a continuar con el procedimiento hay que definir una función auxiliar que calcula la pérdida promedio que supera el VaR, necesita el data frame de las PL y los valores del VaR para que como resultado regrese el vector de los resultados (cada posición corresponde a cada nivel de significancia).
+```{r}
+# EXPECTED SHORTFALL
+ES<-function(df,VaR){
+  es<-c()
+  for(i in VaR){
+  es<-c(es,mean(df[df>i],na.rm=TRUE))
+  }
+  return(es)
+}
+```
+
+Luego ya viene plantear la función que realiza los "m" escenarios para cada activo, es decir:
+
+- Genera la muestra aleatoria de rendimientos normales
+- Construye la función de PL
+- Haya los percentiles o los valores del VaR y del ES en cada escenario
+- Saca el promedio para verificar la convergencia
+- Regresa los dos data frames con los resultados finales
+```{r,warning=FALSE}
+escenario_normal<-function(x,nombre_col,tamaño,m,alpha,tiempo){
+  
+  # Parámetros estimados por máxima verosimilitud para una distribución Normal
+  media<-parametros[[nombre_col]][1]
+  sigma<-parametros[[nombre_col]][2]
+  
+  percentil<-c() # vector para guardar los valores del VaR
+  ES_normal<-c() # vector para guardar los valores del ES
+  
+  # Hacer "m" escenarios
+  for(k in 1:m){
+    muestra <- rnorm(tamaño, mean = media, sd = sigma) # generar muestra aleatoria
+    
+    # Calcular la distribución de Pérdidas y Ganancias
+    ultimo_precio <- tail(precios[[nombre_col]], 1)
+    revaluacion <- ultimo_precio * (1 + muestra)
+    PL <- ultimo_precio - revaluacion
+    # Agregar los resultados del VaR para cada escenario
+    percentil<-rbind(percentil,as.numeric(quantile(PL,alpha)))
+    # Agregar los resultados del ES para cada muestra que se genera
+    ES_normal<-rbind(ES_normal,ES(PL,tail(percentil,1)))
+    }
+  
+  # Hallar el VaR Promedio
+  percentil<-colMeans(percentil,na.rm=TRUE)
+  
+  # Hallar el ES promedio
+  ES_normal<-colMeans(ES_normal,na.rm=TRUE)
+  
+  
+  # Data Frame para guardar los resultados finales o promediados del VaR
+  d1<-data.frame(VaR=as.character(paste0(alpha*100,"%"))) # nombre de las filas
+
+  # VaR para un horizonte de Tiempo
+  for(i in tiempo){
+      VaR_t<- percentil * sqrt(i)
+      col_name<- paste0(i," días")  # Nombre dinámico
+      d1<- d1 %>% mutate(!!col_name:=VaR_t)
+  }
+  # Data Frame para guardar los resultados finales o promediados del ES
+  d2<-data.frame(Confianza=as.character(paste0(alpha*100,"%")))
+  d2<- d2 %>%  mutate(VaR=percentil,ES=ES_normal)
+  return(list(VaR_promedio=d1,ES_promedio=d2))
+}
+# Ejemplo para la primera emisora "ABT" con 5 escenarios
+kable(escenario_normal(rendimientos$ABT,"ABT",n,5,conf,t)[[1]]
+      ,align="cccccccc",digits=4) 
+kable(escenario_normal(rendimientos$ABT,"ABT",n,5,conf,t)[[2]]
+      ,align="ccc",digits=4)
+```
+
+Ahora si se procede a que esta última función se aplique para todas las emisoras, y también ya se van a realizar el número de simulaciones que fueron especificadas al inicio de la sección.
+
+\newpage
+
+### 5,000 Simulaciones
+
+```{r,warning=FALSE}
+# Función que junta cada resultado de los activos en el portafolio, arroja
+# como resultado final dos data frames gigantes que contiene toda la información
+# tanto del VaR como del ES asociado.
+sm_normal<-function(df,escenarios){
+  
+  resultado_completo<-df %>% imap(~ escenario_normal(x = .x,
+                      nombre_col = .y, tamaño = n, m = escenarios,
+                      alpha = conf, tiempo = t))
+  
+  # Elegir sólo el data frame del VaR (primer elemento)
+  VaR_completo <- resultado_completo %>% map_dfr(~ .x[[1]])
+  
+  # Colocar los nombres de los activos en una columna al inicio
+  nombres<-c()
+  for(i in colnames(df)){
+    nombres<-c(nombres,i,"","")
+  }
+  VaR_completo<- VaR_completo %>% mutate(Acción=nombres) %>%
+                 relocate(Acción,.before=1)
+  
+  # Elegir sólo el data frame del ES (segundo elemento)
+  ES_completo <- resultado_completo %>% map_dfr(~ .x[[2]])
+  
+  # Colocar los nombres de los activos en una columna al inicio
+  ES_completo<- ES_completo %>%  mutate(Acción=nombres) %>%
+                 relocate(Acción,.before=1)
+  
+  # Regresa una lista con los dos reultados
+  return(list(VaR_completo=VaR_completo,ES_completo=ES_completo))
+}
+
+VaR_SM<-sm_normal(rendimientos,5000)
+
+kable(VaR_SM[[1]],align="ccccccccc",digits=4)
+
+kable(VaR_SM[[2]],align="cccc",digits=5)
+```
+
+Esto es de manera individual, pero falta realizarlo considerando que estos 20 activos forman parte de un portafolio de inversión y también se quiere conocer la pérdida máxima dado un nivel de confianza en conjunto. Para esto hay que hacer solo una modificación al código anterior porque lo que se tiene que hacer es sumar las Pérdidas y Ganancias individuales de cada emisora.
+
+```{r}
+# Función auxiliar que genera las Pérdidas y Ganancias individuales
+muestra_normal <- function(x, nombre_col, tamaño) {
+  media<-parametros[[nombre_col]][1]
+  sigma<-parametros[[nombre_col]][2]
+  
+  muestra <- rnorm(tamaño, mean = media, sd = sigma)
+  
+  ultimo_precio <- tail(precios[[nombre_col]], 1)
+  revaluacion <- ultimo_precio * (1 + muestra)
+  PL_individual <- ultimo_precio - revaluacion
+  
+  return(PL_individual)
+}
+```
+
+A partir de este punto ya solo es repetir el mismo procedimiento para hallar el VaR.
+
+```{r}
+sm_normal_portafolio<-function(data,tamaño,escenarios,alpha,tiempo){
+  
+
+  percentil<-c() # vector para guardar los valores del VaR
+  ES_normal<-c() # vector para guardar los valores del ES
+  
+  # Hacer "m" escenarios
+  for(k in 1:escenarios){
+    # Calcular la función de Pérdidas y Ganancias del Portafolio
+    PL<- data %>%
+         imap_dfc(~ muestra_normal(.x,.y,tamaño)) %>% 
+         mutate(Portafolio = rowSums(across(everything()))) %>% 
+         dplyr::select(Portafolio)
+    
+    # Agregar los resultados del VaR para cada escenario
+    percentil<-rbind(percentil,as.numeric(quantile(PL$Portafolio,alpha)))
+    
+    # Agregar los resultados del ES para cada muestra que se genera
+    ES_normal<-rbind(ES_normal,ES(PL$Portafolio,tail(percentil,1)))
+    }
+  
+  # Hallar el VaR Promedio
+  percentil<-colMeans(percentil)
+  
+  # Hallar el ES promedio
+  ES_normal<-colMeans(ES_normal,na.rm=TRUE)
+  
+  # Data Frame para guardar los resultados finales o promediados
+  d1<-data.frame(VaR=as.character(paste0(alpha*100,"%"))) # nombre de las filas
+
+  # VaR para un horizonte de Tiempo
+  for(i in tiempo){
+      VaR_t<- percentil * sqrt(i)
+      col_name<- paste0(i," días")  # Nombre dinámico
+      d1<- d1 %>% mutate(!!col_name:=VaR_t)
+    }
+  # Colocar como nombre del Activo el "Portafolio"
+  d1<- d1 %>% mutate(Acción=rep("Portafolio",3)) %>%
+                 relocate(Acción,.before=1)
+  
+  # Data Frame para guardar los resultados finales o promediados del ES
+  d2<-data.frame(Confianza=as.character(paste0(alpha*100,"%")))
+  d2<- d2 %>%  mutate(VaR=percentil,ES=ES_normal) %>%
+    mutate(Acción=rep("Portafolio",3)) %>% relocate(Acción,.before=1)
+  
+  
+  return(list(VaR_promedio=d1,ES_promedio=d2))
+}
+VaR_SM_portafolio<-sm_normal_portafolio(rendimientos,n,5000,conf,t)
+kable(VaR_SM_portafolio[[1]],align="ccccccccc",digits=4)
+kable(VaR_SM_portafolio[[2]],align="cccc",digits=5)
+```
+\newpage
+
+### 10,000 Simulaciones
+```{r}
+# VaR Individual
+VaR_SM<-sm_normal(rendimientos,10000)
+kable(VaR_SM[[1]],align="ccccccccc",digits=4)
+kable(VaR_SM[[2]],align="cccc",digits=5)
+```
+
+```{r}
+# VaR Portafolio
+VaR_SM_portafolio<-sm_normal_portafolio(rendimientos,n,10000,conf,t)
+kable(VaR_SM_portafolio[[1]],align="ccccccccc",digits=4)
+kable(VaR_SM_portafolio[[2]],align="cccc",digits=5)
+```
+
+\newpage
+
+### 20,000 Simulaciones
+```{r}
+# VaR Individual
+VaR_SM<-sm_normal(rendimientos,20000)
+kable(VaR_SM[[1]],align="ccccccccc",digits=4)
+kable(VaR_SM[[2]],align="cccc",digits=5)
+```
+
+```{r}
+# VaR Portafolio
+VaR_SM_portafolio<-sm_normal_portafolio(rendimientos,n,20000,conf,t)
+kable(VaR_SM_portafolio[[1]],align="ccccccccc",digits=4)
+kable(VaR_SM_portafolio[[2]],align="cccc",digits=5)
+```
+
+### Análisis de la Simulación Monte Carlo Normal
+
+En esta simulación se generaron trayectorias sintéticas de rendimientos asumiendo que los mismos siguen una distribución normal, parametrizada a partir de la media y desviación estándar empíricas del portafolio.
+
+El principal beneficio de este enfoque radica en su simplicidad y en la capacidad de modelar una amplia gama de escenarios futuros de manera controlada. Sin embargo, su mayor debilidad es la suposición de normalidad, que muchas veces no se ajusta al comportamiento real de los mercados financieros. Al no capturar adecuadamente las colas de la distribución, puede subestimar el riesgo en situaciones extremas.
+
+Este modelo es útil como línea base o punto de comparación frente a otros enfoques más flexibles, aunque por sí solo puede no ser suficiente en contextos de alta volatilidad.
+
+
+\newpage
+
+## SIMULACIÓN MONTECARLO LAPLACE
+
+Este método se caracteriza por ser útil cuando hay **alta curtosis** y por lo general es en activos con alta volatilidad como criptomonedas. Cuando existe este fenómeno no es bueno utilizar la distribución normal ya que se pueden subestimar las pérdidas, así que se ahora se propone que los rendimientos siguen la **distribución de Laplace o Doble Exponencial**. De igual manera que el método anterior, se van a estimar los parámetros de **localización y escala** por el método de máxima verosimilitud. Luego se hará lo mismo para calcular la Revaluación y la función de Pérdidas y Ganancias. Por último se aplicará la **Simulación Montecarlo** para ver la convergencia del VaR ante distintos niveles de confianza y también del ES.
+
+### Kurtosis
+
+Se va a obtener la **curtosis** para ver si este método puede ser adecuado.
+
+```{r,warning=FALSE}
+curtosis<-rendimientos %>% summarise(across(everything(),~kurtosis(.x)))
+kable(curtosis[1:7],align="ccccccc",digits=3)
+kable(curtosis[8:14],align="ccccccc",digits=3)
+kable(curtosis[15:20],align="cccccc",digits=3)
+```
+
+*Todos los coeficientes de curtosis son positivos y mayores a 3, lo que significa que todas las emisoras presentan una forma leptocúrtica en sus distribuciones. Esto pasa cuando en los datos se presenta un elevado grado de concentración alrededor de los valores centrales de la variable, dándole un pico alto en los histogramas. Las colas de la distribución son más pesadas (como se ha señalado para varias emisoras), lo que significa que los valores extremos son más probables.*
+
+\newpage
+
+### Estimación de Parámetros
+
+Ahora los parámetros van a pertenecer a la distribución de Laplace en vez de una normal
+```{r,warning=FALSE}
+# Obtener los parámetros por máxima verosimilitud
+parametros_laplace<-function(x,nombre_col){
+  mod <- fitdist(x, "laplace", method = "mle",start=list(location=0,scale=1))
+  location <- coef(mod)[1]
+  scale <- coef(mod)[2]
+  df<-data.frame(c(location,scale))
+  colnames(df)<-nombre_col
+  return(df)
+}
+parametros<-rendimientos %>% imap_dfc(~parametros_laplace(.x,.y))
+kable(parametros[1:5],align="ccccc",digits=7)
+kable(parametros[6:10],align="ccccc",digits=7)
+kable(parametros[11:15],align="ccccc",digits=7)
+kable(parametros[16:20],align="ccccc",digits=7)
+```
+\newpage
+
+### Rendimientos Simulados
+
+Al igual que el método anterior se puede extraer una muestra de los rendimientos simulados para cada emisora, los cuales deben mostrar el comportamiento de un pico cuando se haga la gráfica debido a que se aplica una distribución para casos con alta curtosis.
+```{r,fig.width=20,fig.height=20,out.width='100%'}
+rend_laplace <- function(x, nombre_col, tamaño) {
+  location<-parametros[[nombre_col]][1]
+  scale<-parametros[[nombre_col]][2]
+  
+  muestra <- rlaplace(tamaño, location= location, scale= scale)
+  
+  return(muestra)
+}
+rend_simulados<- rendimientos %>%  imap_dfc(~rend_laplace(.x,.y,n))
+
+histograma_rend_sim<-function(col_name,df){
+  ggplot(data =df, aes(x =.data[[col_name]])) +
+    geom_histogram(aes(y=after_stat(density)),fill = "peachpuff",
+                   col = "black", lwd = 0.8, bins = 30)+
+    geom_density(col="darkorange2",lwd=5,lty=6)+
+    labs(title = paste("RENDIMIENTOS LAPLACE",col_name),
+         x = "Valores", y = "Frecuencia")+
+    theme_classic()}
+
+graficos_simulados<-map(names(rend_simulados),
+                  ~histograma_rend_sim(.x,rend_simulados))
+wrap_plots(graficos_simulados[1:20], nrow = 5)
+```
+Todo el proceso es el mismo y se volverá a utilizar, solo que se debe adaptar el código anterior porque se cambió la distribución propuesta para los rendimientos.
+```{r,warning=FALSE}
+escenario_laplace<-function(x,nombre_col,tamaño,m,alpha,tiempo){
+  
+  # Parámetros estimados por máxima verosimilitud para una distribución Laplace
+  location<-parametros[[nombre_col]][1]
+  scale<-parametros[[nombre_col]][2]
+  
+  
+  percentil<-c() # vector para guardar los valores del VaR
+  ES_laplace<-c() # vector para guardar los valores del ES
+  
+  # Hacer "m" escenarios
+  for(k in 1:m){
+    muestra <- rlaplace(tamaño,location=location,scale=scale) # generar muestra aleatoria
+    
+    # Calcular la distribución de Pérdidas y Ganancias
+    ultimo_precio <- tail(precios[[nombre_col]], 1)
+    revaluacion <- ultimo_precio * (1 + muestra)
+    PL <- ultimo_precio - revaluacion
+    # Agregar los resultados del VaR para cada escenario
+    percentil<-rbind(percentil,as.numeric(quantile(PL,alpha)))
+    # Agregar los resultados del ES para cada muestra que se genera
+    ES_laplace<-rbind(ES_laplace,ES(PL,tail(percentil,1)))
+    }
+  
+  # Hallar el VaR Promedio
+  percentil<-colMeans(percentil,na.rm=TRUE)
+  
+  # Hallar el ES promedio
+  ES_laplace<-colMeans(ES_laplace,na.rm=TRUE)
+  
+  # Data Frame para guardar los resultados finales o promediados del VaR
+  d1<-data.frame(VaR=as.character(paste0(alpha*100,"%"))) # nombre de las filas
+
+  # VaR para un horizonte de Tiempo
+  for(i in tiempo){
+      VaR_t<- percentil * sqrt(i)
+      col_name<- paste0(i," días")  # Nombre dinámico
+      d1<- d1 %>% mutate(!!col_name:=VaR_t)
+  }
+  # Data Frame para guardar los resultados finales o promediados del ES
+  d2<-data.frame(Confianza=as.character(paste0(alpha*100,"%")))
+  d2<- d2 %>%  mutate(VaR=percentil,ES=ES_laplace)
+  return(list(VaR_promedio=d1,ES_promedio=d2))
+}
+# Ejemplo para la primera emisora "ABT" con 5 escenarios
+kable(escenario_laplace(rendimientos$ABT,"ABT",n,5,conf,t)[[1]],align="cccccccc",digits=4)
+kable(escenario_laplace(rendimientos$ABT,"ABT",n,5,conf,t)[[2]],align="ccc",digits=4)
+```
+
+Ahora si se procede a que esta última función se aplique para todas las emisoras, y también ya se van a realizar el número de simulaciones que fueron especificadas al inicio de la sección.
+\newpage
+
+### 5,000 Simulaciones
+
+```{r,warning=FALSE}
+# Función que junta cada resultado de los activos en el portafolio, arroja
+# como resultado final dos data frames gigantes que contiene toda la información
+# tanto del VaR como del ES asociado.
+sm_laplace<-function(df,escenarios){
+  
+  resultado_completo<-df %>% imap(~ escenario_laplace(x = .x,
+                      nombre_col = .y, tamaño = n, m = escenarios,
+                      alpha = conf, tiempo = t))
+  
+  # Elegir sólo el data frame del VaR (primer elemento)
+  VaR_completo <- resultado_completo %>% map_dfr(~ .x[[1]])
+  
+  # Colocar los nombres de los activos en una columna al inicio
+  nombres<-c()
+  for(i in colnames(df)){
+    nombres<-c(nombres,i,"","")
+  }
+  VaR_completo<- VaR_completo %>% mutate(Acción=nombres) %>%
+                 relocate(Acción,.before=1)
+  
+  # Elegir sólo el data frame del ES (segundo elemento)
+  ES_completo <- resultado_completo %>% map_dfr(~ .x[[2]])
+  
+  # Colocar los nombres de los activos en una columna al inicio
+  ES_completo<- ES_completo %>%  mutate(Acción=nombres) %>%
+                 relocate(Acción,.before=1)
+  
+  # Regresa una lista con los dos reultados
+  return(list(VaR_completo=VaR_completo,ES_completo=ES_completo))
+}
+
+VaR_SM_laplace<-sm_laplace(rendimientos,5000)
+
+kable(VaR_SM_laplace[[1]],align="ccccccccc",digits=4)
+
+kable(VaR_SM_laplace[[2]],align="cccc",digits=5)
+```
+
+Esto es de manera individual, pero falta realizarlo considerando que estos 20 activos forman parte de un portafolio de inversión y también se quiere conocer la pérdida máxima dado un nivel de confianza en conjunto. Para esto hay que hacer solo una modificación al código anterior porque lo que se tiene que hacer es sumar las Pérdidas y Ganancias individuales de cada emisora.
+
+```{r}
+# Función auxiliar que genera las Pérdidas y Ganancias individuales
+muestra_laplace <- function(x, nombre_col, tamaño) {
+  location<-parametros[[nombre_col]][1]
+  scale<-parametros[[nombre_col]][2]
+  
+  muestra <-rlaplace(tamaño, location = location, scale = scale)
+  
+  ultimo_precio <- tail(precios[[nombre_col]], 1)
+  revaluacion <- ultimo_precio * (1 + muestra)
+  PL_individual <- ultimo_precio - revaluacion
+  
+  return(PL_individual)
+}
+```
+
+A partir de este punto ya solo es repetir el mismo procedimiento para hallar el VaR.
+
+```{r}
+sm_laplace_portafolio<-function(data,tamaño,escenarios,alpha,tiempo){
+  
+ 
+  percentil<-c() # vector para guardar los valores del VaR
+  ES_laplace<-c() # vector para guardar los valores del ES
+  
+  # Hacer "m" escenarios
+  for(k in 1:escenarios){
+    # Calcular la función de Pérdidas y Ganancias del Portafolio
+    PL<- data %>%
+         imap_dfc(~ muestra_laplace(.x,.y,tamaño)) %>% 
+         mutate(Portafolio = rowSums(across(everything()))) %>% 
+         dplyr::select(Portafolio)
+    
+    # Agregar los resultados del VaR para cada escenario
+    percentil<-rbind(percentil,as.numeric(quantile(PL$Portafolio,alpha)))
+    
+    # Agregar los resultados del ES para cada muestra que se genera
+    ES_laplace<-rbind(ES_laplace,ES(PL$Portafolio,tail(percentil,1)))
+    }
+  
+  # Hallar el VaR Promedio
+  percentil<-colMeans(percentil)
+  
+  # Hallar el ES promedio
+  ES_laplace<-colMeans(ES_laplace,na.rm=TRUE)
+  
+  # Data Frame para guardar los resultados finales o promediados
+  d1<-data.frame(VaR=as.character(paste0(alpha*100,"%"))) # nombre de las filas
+
+  # VaR para un horizonte de Tiempo
+  for(i in tiempo){
+      VaR_t<- percentil * sqrt(i)
+      col_name<- paste0(i," días")  # Nombre dinámico
+      d1<- d1 %>% mutate(!!col_name:=VaR_t)
+    }
+  # Colocar como nombre del Activo el "Portafolio"
+  d1<- d1 %>% mutate(Acción=rep("Portafolio",3)) %>%
+                 relocate(Acción,.before=1)
+  
+  # Data Frame para guardar los resultados finales o promediados del ES
+  d2<-data.frame(Confianza=as.character(paste0(alpha*100,"%")))
+  d2<- d2 %>%  mutate(VaR=percentil,ES=ES_laplace) %>%
+    mutate(Acción=rep("Portafolio",3)) %>% relocate(Acción,.before=1)
+  
+  
+  return(list(VaR_promedio=d1,ES_promedio=d2))
+}
+VaR_SM_laplace_portafolio<-sm_laplace_portafolio(rendimientos,n,5000,conf,t)
+kable(VaR_SM_laplace_portafolio[[1]],align="ccccccccc",digits=4)
+kable(VaR_SM_laplace_portafolio[[2]],align="cccc",digits=5)
+```
+\newpage
+
+### 10,000 Simulaciones
+```{r}
+# VaR Individual
+VaR_SM_laplace<-sm_laplace(rendimientos,10000)
+
+kable(VaR_SM_laplace[[1]],align="ccccccccc",digits=4)
+
+kable(VaR_SM_laplace[[2]],align="cccc",digits=5)
+```
+
+```{r}
+# VaR Portafolio
+VaR_SM_laplace_portafolio<-sm_laplace_portafolio(rendimientos,n,10000,conf,t)
+kable(VaR_SM_laplace_portafolio[[1]],align="ccccccccc",digits=4)
+kable(VaR_SM_laplace_portafolio[[2]],align="cccc",digits=5)
+```
+
+\newpage
+
+### 20,000 Simulaciones
+```{r}
+# VaR Individual
+VaR_SM_laplace<-sm_laplace(rendimientos,20000)
+
+kable(VaR_SM_laplace[[1]],align="ccccccccc",digits=4)
+
+kable(VaR_SM_laplace[[2]],align="cccc",digits=5)
+```
+
+```{r}
+# VaR Portafolio
+VaR_SM_laplace_portafolio<-sm_laplace_portafolio(rendimientos,n,20000,conf,t)
+kable(VaR_SM_laplace_portafolio[[1]],align="ccccccccc",digits=4)
+kable(VaR_SM_laplace_portafolio[[2]],align="cccc",digits=5)
+```
+
+### Análisis de la Simulación Monte Carlo Laplace
+
+En esta variante de simulación Monte Carlo se utilizó la distribución Laplace como base para la generación de trayectorias de rendimientos. Esta distribución se caracteriza por tener colas más pesadas que la distribución normal, lo cual permite capturar mejor los eventos extremos que pueden ocurrir en los mercados financieros.
+
+Este enfoque mejora la estimación del VaR al asignar mayor probabilidad a pérdidas severas, resultando en una evaluación del riesgo más conservadora y realista. Es especialmente adecuado cuando se busca reflejar escenarios adversos con mayor fidelidad, sin recurrir a simulaciones totalmente no paramétricas. El método balancea adecuadamente el control estadístico con una mayor sensibilidad al riesgo extremo.
+
+\newpage
+
+## SIMULACIÓN MONTECARLO BOOTSTRAPPING
+
+En este caso se está asumiendo que los rendimientos históricos van a volver a ocurrir, pero en orden diferente. Dicho de otro modo, aquí se va a realizar un **remuestreo con reemplazo** donde los rendimientos históricos tienen la misma probabilidad de ocurrir. Lo que se gana con este método es que la muestra simulada conserva el comportamiento de la distribución empírica. Posteriormente se hace los mismo que con los otros dos métodos, aplicar la **Simulación Montecarlo** para ver la convergencia del VaR y del ES.
+
+### Rendimientos Simulados
+
+Podemos obtener una muestra de los rendimientos histórcos para cada emisora, los cuales se parecen mucho a los que se graficaron en un inicio debido a que se hereda el comportamiento.
+```{r,fig.width=20,fig.height=20,out.width='100%'}
+remuestreo <- function(x, tamaño) {
+
+  muestra <- sample(x,tamaño,replace=TRUE)
+  
+  return(muestra)
+}
+rend_simulados<- rendimientos %>%  map_dfc(~ remuestreo(.x,n))
+
+histograma_rend_sim<-function(col_name,df){
+  ggplot(data =df, aes(x =.data[[col_name]])) +
+    geom_histogram(aes(y=after_stat(density)),fill = "gray70",
+                   col = "black", lwd = 0.8, bins = 30)+
+    geom_density(col="gray20",lwd=5,lty=6)+
+    labs(title = paste("RENDIMIENTOS REMUESTRADOS",col_name),
+         x = "Valores", y = "Frecuencia")+
+    theme_classic()}
+
+graficos_simulados<-map(names(rend_simulados),
+                  ~histograma_rend_sim(.x,rend_simulados))
+wrap_plots(graficos_simulados[1:20], nrow = 5)
+```
+El código sufre una modificación ya que en lugar de ocupar *rnorm o rlaplace* para extraer los rendimientos en las simulaciones, ahora se usará *sample* que ayuda a realizar el remuestreo de los históricos.
+```{r,warning=FALSE}
+bootstrap<-function(x,nombre_col,tamaño,m,alpha,tiempo){
+  
+  
+  percentil<-c() # vector para guardar los valores del VaR
+  ES_bootstrap<-c() # vector para guardar los valores del ES
+  
+  # Hacer "m" escenarios
+  for(k in 1:m){
+    muestra <- sample(x,tamaño,replace=TRUE) # generar muestra aleatoria con reemplazo
+    
+    # Calcular la distribución de Pérdidas y Ganancias
+    ultimo_precio <- tail(precios[[nombre_col]], 1)
+    revaluacion <- ultimo_precio * (1 + muestra)
+    PL <- ultimo_precio - revaluacion
+    # Agregar los resultados del VaR para cada escenario
+    percentil<-rbind(percentil,as.numeric(quantile(PL,alpha)))
+    # Agregar los resultados del ES para cada muestra que se genera
+    ES_bootstrap<-rbind(ES_bootstrap,ES(PL,tail(percentil,1)))
+    }
+  
+  # Hallar el VaR Promedio
+  percentil<-colMeans(percentil,na.rm=TRUE)
+  
+  # Hallar el ES promedio
+  ES_bootstrap<-colMeans(ES_bootstrap,na.rm=TRUE)
+  
+  # Data Frame para guardar los resultados finales o promediados del VaR
+  d1<-data.frame(VaR=as.character(paste0(alpha*100,"%"))) # nombre de las filas
+
+  # VaR para un horizonte de Tiempo
+  for(i in tiempo){
+      VaR_t<- percentil * sqrt(i)
+      col_name<- paste0(i," días")  # Nombre dinámico
+      d1<- d1 %>% mutate(!!col_name:=VaR_t)
+  }
+  # Data Frame para guardar los resultados finales o promediados del ES
+  d2<-data.frame(Confianza=as.character(paste0(alpha*100,"%")))
+  d2<- d2 %>%  mutate(VaR=percentil,ES=ES_bootstrap)
+  return(list(VaR_promedio=d1,ES_promedio=d2))
+}
+# Ejemplo para la primera emisora "ABT" con 5 escenarios
+kable(bootstrap(rendimientos$ABT,"ABT",n,5,conf,t)[[1]], align="cccccccc",digits=4) 
+kable(bootstrap(rendimientos$ABT,"ABT",n,5,conf,t)[[2]], align="ccc",digits=4)
+```
+
+Ahora si se procede a que esta última función se aplique para todas las emisoras, y también ya se van a realizar el número de simulaciones que fueron especificadas al inicio de la sección.
+
+\newpage
+
+### 5,000 Simulaciones
+
+```{r,warning=FALSE}
+# Función que junta cada resultado de los activos en el portafolio, arroja
+# como resultado final dos data frames gigantes que contiene toda la información
+# tanto del VaR como del ES asociado.
+sm_bootstrap<-function(df,escenarios){
+  
+  resultado_completo<-df %>% imap(~ bootstrap(x = .x,
+                      nombre_col = .y, tamaño = n, m = escenarios,
+                      alpha = conf, tiempo = t))
+  
+  # Elegir sólo el data frame del VaR (primer elemento)
+  VaR_completo <- resultado_completo %>% map_dfr(~ .x[[1]])
+  
+  # Colocar los nombres de los activos en una columna al inicio
+  nombres<-c()
+  for(i in colnames(df)){
+    nombres<-c(nombres,i,"","")
+  }
+  VaR_completo<- VaR_completo %>% mutate(Acción=nombres) %>%
+                 relocate(Acción,.before=1)
+  
+  # Elegir sólo el data frame del ES (segundo elemento)
+  ES_completo <- resultado_completo %>% map_dfr(~ .x[[2]])
+  
+  # Colocar los nombres de los activos en una columna al inicio
+  ES_completo<- ES_completo %>%  mutate(Acción=nombres) %>%
+                 relocate(Acción,.before=1)
+  
+  # Regresa una lista con los dos reultados
+  return(list(VaR_completo=VaR_completo,ES_completo=ES_completo))
+}
+
+VaR_SM_bootstrap<-sm_bootstrap(rendimientos,5000)
+
+kable(VaR_SM_bootstrap[[1]],align="ccccccccc",digits=4)
+
+kable(VaR_SM_bootstrap[[2]],align="cccc",digits=5)
+```
+
+Esto es de manera individual, pero falta realizarlo considerando que estos 20 activos forman parte de un portafolio de inversión y también se quiere conocer la pérdida máxima dado un nivel de confianza en conjunto. Para esto hay que hacer solo una modificación al código anterior porque lo que se tiene que hacer es sumar las Pérdidas y Ganancias individuales de cada emisora.
+
+```{r}
+# Función auxiliar que genera las Pérdidas y Ganancias individuales
+remuestreo_PL<- function(x, nombre_col, tamaño) {
+  
+  muestra <- sample(x,tamaño,replace=TRUE) # generar muestra aleatoria con reemplazo
+  
+  ultimo_precio <- tail(precios[[nombre_col]], 1)
+  revaluacion <- ultimo_precio * (1 + muestra)
+  PL_individual <- ultimo_precio - revaluacion
+  
+  return(PL_individual)
+}
+```
+
+A partir de este punto ya solo es repetir el mismo procedimiento para hallar el VaR.
+
+```{r}
+sm_bootstrap_portafolio<-function(data,tamaño,escenarios,alpha,tiempo){
+  
+  
+  percentil<-c() # vector para guardar los valores del VaR
+  ES_bootstrap<-c() # vector para guardar los valores del ES
+  
+  # Hacer "m" escenarios
+  for(k in 1:escenarios){
+    # Calcular la función de Pérdidas y Ganancias del Portafolio
+    PL<- data %>%
+         imap_dfc(~ remuestreo_PL(.x,.y,tamaño)) %>% 
+         mutate(Portafolio = rowSums(across(everything()))) %>% 
+         dplyr::select(Portafolio)
+    
+    # Agregar los resultados del VaR para cada escenario
+    percentil<-rbind(percentil,as.numeric(quantile(PL$Portafolio,alpha)))
+    
+    # Agregar los resultados del ES para cada muestra que se genera
+    ES_bootstrap<-rbind(ES_bootstrap,ES(PL$Portafolio,tail(percentil,1)))
+    }
+  
+  # Hallar el VaR Promedio
+  percentil<-colMeans(percentil)
+  
+  # Hallar el ES promedio
+  ES_bootstrap<-colMeans(ES_bootstrap,na.rm=TRUE)
+  
+  # Data Frame para guardar los resultados finales o promediados
+  d1<-data.frame(VaR=as.character(paste0(alpha*100,"%"))) # nombre de las filas
+
+  # VaR para un horizonte de Tiempo
+  for(i in tiempo){
+      VaR_t<- percentil * sqrt(i)
+      col_name<- paste0(i," días")  # Nombre dinámico
+      d1<- d1 %>% mutate(!!col_name:=VaR_t)
+    }
+  # Colocar como nombre del Activo el "Portafolio"
+  d1<- d1 %>% mutate(Acción=rep("Portafolio",3)) %>%
+                 relocate(Acción,.before=1)
+  
+  # Data Frame para guardar los resultados finales o promediados del ES
+  d2<-data.frame(Confianza=as.character(paste0(alpha*100,"%")))
+  d2<- d2 %>%  mutate(VaR=percentil,ES=ES_bootstrap) %>%
+    mutate(Acción=rep("Portafolio",3)) %>% relocate(Acción,.before=1)
+  
+  
+  return(list(VaR_promedio=d1,ES_promedio=d2))
+}
+VaR_SM_bootstrap_portafolio<-sm_bootstrap_portafolio(rendimientos,n,5000,conf,t)
+kable(VaR_SM_bootstrap_portafolio[[1]],align="ccccccccc",digits=4)
+kable(VaR_SM_bootstrap_portafolio[[2]],align="cccc",digits=5)
+```
+\newpage
+
+### 10,000 Simulaciones
+```{r}
+# VaR Individual
+VaR_SM_bootstrap<-sm_bootstrap(rendimientos,10000)
+kable(VaR_SM_bootstrap[[1]],align="ccccccccc",digits=4)
+kable(VaR_SM_bootstrap[[2]],align="cccc",digits=5)
+```
+
+```{r}
+# VaR Portafolio
+VaR_SM_bootstrap_portafolio<-sm_bootstrap_portafolio(rendimientos,n,10000,conf,t)
+kable(VaR_SM_bootstrap_portafolio[[1]],align="ccccccccc",digits=4)
+kable(VaR_SM_bootstrap_portafolio[[2]],align="cccc",digits=5)
+```
+
+\newpage
+
+### 20,000 Simulaciones
+```{r}
+# VaR Individual
+VaR_SM_bootstrap<-sm_bootstrap(rendimientos,20000)
+kable(VaR_SM_bootstrap[[1]],align="ccccccccc",digits=4)
+kable(VaR_SM_bootstrap[[2]],align="cccc",digits=5)
+```
+
+```{r}
+# VaR Portafolio
+VaR_SM_bootstrap_portafolio<-sm_bootstrap_portafolio(rendimientos,n,20000,conf,t)
+kable(VaR_SM_bootstrap_portafolio[[1]],align="ccccccccc",digits=4)
+kable(VaR_SM_bootstrap_portafolio[[2]],align="cccc",digits=5)
+```
+
+### Análisis de la Simulación por Bootstrapping
+
+El método de bootstrapping consiste en tomar muestras aleatorias con reemplazo de los rendimientos históricos para construir nuevas trayectorias del portafolio. Esto permite conservar la estructura empírica de los datos, pero generando combinaciones novedosas que pueden no haberse presentado en la serie original.
+
+A diferencia de la simulación histórica tradicional, el bootstrapping introduce mayor variabilidad y flexibilidad, lo que resulta útil para evaluar escenarios alternativos sin depender de supuestos paramétricos. Esta técnica es particularmente efectiva para capturar tanto los comportamientos típicos del mercado como posibles situaciones atípicas, brindando una estimación sólida del VaR basada en los datos reales.
+
+
+
+\newpage
+
+## ALISADO EXPONENCIAL
+
+De lo que se trata este método es primero calcular los rendimientos (en este caso son discretos) para llegar a la función de Pérdidas y Ganancias. A partir de ese punto se le asigna una mayor probabilidad de ocurrencia a los valores que son más recientes, por lo que se propone una función decreciente que cumple con ese propósito, la cual es la **Distribución Geométrica**. Entonces el alisado consiste en:
+
+$$\mathbf{\text{Alisado} = \alpha ^{k} * \beta }$$
+$$ \text{con} \ \ \alpha + \beta = 1 $$
+
+Cuando ya se han establecido las probabilidades correctamente, lo que sigue es hallar la función de **Distribución Acumulada** para poder obtener el precentil que le corresponde al VaR con el nivel de significancia requerido.
+
+**NOTA: Para todas las acciones se va a establecer los mismos parámetros para la función decreciente, en este caso se va a considerar:** $\mathbf{\alpha=0.95 \ y \ \beta = 0.05}$
+
+Para realizar este método y observar los resultados se va a crear una función que lo aplica solo para una emisora y después se van a pegar los resultados para llegar a un data frame completo que contiene toda la información,la función hace lo siguiente:
+
+  1. Utiliza el data frame de simulación histórica que contiene las PL de cada emisora incluyendo la del Portafolio.
+  2. Extrae esa columna y le aplica el alisado (la fórmula de la distribución geométrica) donde las observaciones más recientes tienen mayor probabilidad.
+  3. Ordena las PL de modo que las ganancias (valores negativos) van primero, con esto ya se hace la suma acumulada para hallar la $F_x$.
+  4. Luego se agrega la función de supervivencia usando el complemento de la acumulada.
+  5. Se reordena el data frame colocando las PL en forma descendiente porque las pérdidas tienen signo positivo, esto ya permite hallar el percentil correspondiente a los niveles de confianza.
+  6. Contruye los data frames para el VaR de un horizonte de tiempo y para el ES.
+  7. Regresa una lista que tiene 6 resultados: PL ordenadas, Densidad (fx), Acumulada (Fx), Supervivencia (Sx), VaR con horizonte de tiempo y ES.
+
+```{r}
+# ALISADO EXPONENCIAL INDIVIDUAL
+alisado_exp<-function(x,nombre_col,tamaño,alpha,tiempo,parametro){
+  
+  # Pérdidas y Ganancias
+  PL<- simulacion_histórica %>% dplyr::select(nombre_col)
+  colnames(PL)<-c("PL")
+  rownames(PL) <- NULL
+  
+  # Densidad, Acumulada y Supervivencia
+  fx<- PL %>% mutate(fx=(1-parametro)*parametro ^(tamaño - row_number()))
+  Funciones<- fx %>% dplyr::arrange(PL) %>% mutate(Fx=cumsum(fx),Sx=1-Fx)
+  Funciones<- Funciones %>% dplyr::arrange(desc(PL))
+  
+  # Calcular el VaR
+  VaR<-c()
+  for(i in alpha){
+  VaR<-c(VaR,Funciones$PL[length(Funciones$Fx[Funciones$Fx>i])])
+  }
+  
+  # Calcular el ES
+  ES<-c()
+  for(i in VaR){
+  ES<-c(ES,mean(Funciones$PL[Funciones$PL>i],na.rm=TRUE))
+  }
+  
+  # Data Frame para guardar los resultados finales del VaR
+  d1<-data.frame(VaR=as.character(paste0(alpha*100,"%"))) # nombre de las filas
+
+  # VaR para un horizonte de Tiempo
+  for(i in tiempo){
+      VaR_t<- VaR * sqrt(i)
+      col_name<- paste0(i," días")  # Nombre dinámico
+      d1<- d1 %>% mutate(!!col_name:=VaR_t)
+  }
+  # Data Frame para guardar los resultados finales del ES
+  d2<-data.frame(Confianza=as.character(paste0(alpha*100,"%")))
+  d2<- d2 %>%  mutate(VaR=VaR,ES=ES)
+  
+  colnames(Funciones)<-c(nombre_col,paste0("fx_",nombre_col),
+                         paste0("Fx_",nombre_col),paste0("Sx_",nombre_col))
+  
+  # Resultados
+  return(list(Funciones %>% dplyr::select(nombre_col),
+              Funciones %>% dplyr::select(paste0("fx_",nombre_col)),
+              Funciones %>% dplyr::select(paste0("Fx_",nombre_col)),
+              Funciones %>% dplyr::select(paste0("Sx_",nombre_col)),
+              d1,
+              d2))
+}
+```
+
+Finalmente usando *imap* se va a ejecutar esta función para las 20 acciones y para el Portafolio, solo se deben colocar los argumentos que requiere. Todos los resultados se van a ir guardando en variables auxiliares para que al final se puedan llamar y observar.
+
+```{r}
+resultado_completo<-simulacion_histórica %>% imap(~alisado_exp(x = .x,
+                      nombre_col = .y, tamaño = n,
+                      alpha = conf, tiempo = t,parametro=0.95))
+  
+  # Pérdidas y Ganancias de todas las emisoras
+  PL_alisado<- resultado_completo %>% map_dfc(~.x[[1]])
+  
+  # Funciones de Densidad
+  fx_alisado<- resultado_completo %>% map_dfc(~.x[[2]])
+  
+  # Funciones de Distribución Acumulada
+  Fx_alisado<- resultado_completo %>% map_dfc(~.x[[3]])
+  
+  # Funciones de Superviviencia
+  Sx_alisado<- resultado_completo %>% map_dfc(~.x[[4]])
+
+  # Elegir sólo el data frame del VaR (quinto resultado)
+  VaR_alisado<- resultado_completo %>% map_dfr(~ .x[[5]])
+  
+  # Colocar los nombres de los activos en una columna al inicio
+  nombres<-c()
+  for(i in colnames(simulacion_histórica)){
+    nombres<-c(nombres,i,"","")
+  }
+  VaR_alisado<- VaR_alisado %>% mutate(Acción=nombres) %>%
+                 relocate(Acción,.before=1)
+  
+  # Elegir sólo el data frame del ES (sexto elemento)
+  ES_alisado <- resultado_completo %>% map_dfr(~ .x[[6]])
+  
+  # Colocar los nombres de los activos en una columna al inicio
+  ES_alisado<- ES_alisado %>%  mutate(Acción=nombres) %>%
+                 relocate(Acción,.before=1)
+```
+
+```{r}
+# VaR y ES
+kable(VaR_alisado,align="ccccccccc",digits=4)
+kable(ES_alisado,align="cccc",digits=5)
+```
+
+Con los data frames obtenidos es posible graficar las funciones de distribución acumulada, supervivencia y de densidad para cada emisora y del portafolio.
+
+```{r,fig.width=12, fig.height=20, out.width='100%',out.height='100%'}
+# FUNCIONES DE DISTRIBUCIÓN ACUMULADA
+par(mfrow = c(7, 3))  # 7 filas x 3 columnas
+for(i in colnames(simulacion_histórica)){
+  nombre<-paste0("Fx_",i)
+  plot(PL_alisado[[i]],Fx_alisado[[nombre]],type="l",col="forestgreen",
+       lwd=2,xlab="Pérdida o Ganancia",ylab="Probabilidad",
+       main = paste("DISTRIBUCIÓN ACUMULADA DE", i))
+}
+```
+
+```{r, fig.width=12, fig.height=20, out.width='100%', out.height='100%'}
+# FUNCIONES DE SUPERVIVENCIA
+par(mfrow = c(7, 3))  # 7 filas x 3 columnas
+for(i in colnames(simulacion_histórica)){
+  nombre<-paste0("Sx_",i)
+  plot(PL_alisado[[i]],Sx_alisado[[nombre]],type="l",col="forestgreen",
+       lwd=2,xlab="Pérdida o Ganancia",ylab="Probabilidad",
+       main = paste("FUNCIÓN DE SUPERVIVENCIA DE", i))
+}
+```
+
+```{r, fig.width=12, fig.height=20, out.width='100%', out.height='100%'}
+# FUNCIONES DE DENSIDAD
+par(mfrow = c(7, 3))  # 7 filas x 3 columnas
+for(i in colnames(simulacion_histórica)){
+  nombre<-paste0("fx_",i)
+  plot(PL_alisado[[i]],fx_alisado[[nombre]],type="l",col="forestgreen",
+       lwd=2,xlab="Pérdida o Ganancia",ylab="Probabilidad",
+       main = paste("DENSIDAD DE", i))
+}
+```
+
+### Análisis con Alisado Exponencial
+
+El método de alisado exponencial fue utilizado para ponderar los rendimientos históricos asignando mayor peso a los datos más recientes. Esta técnica parte del supuesto de que los rendimientos pasados no tienen la misma relevancia y que los eventos más recientes reflejan mejor el estado actual del mercado.
+
+Al aplicar esta ponderación exponencial, la estimación del VaR se vuelve más sensible a la volatilidad y tendencias actuales, ajustando la evaluación del riesgo a las condiciones del mercado más recientes. Este enfoque es particularmente valioso en contextos donde se ha producido un cambio estructural o una alteración significativa en la dinámica de los precios, y se desea capturar dicha evolución de forma efectiva sin recurrir a modelos paramétricos ni simulaciones.
+
+\newpage
+
+## COMPARACIÓN DE MODELOS
+
+Tratándose de las acciones de manera individual y ocupando los resultados de las 20,000 simulaciones (debido a que hay más certeza por la convergencia) se puede rescatar lo siguiente:
+
+  1. No hay muchas variaciones entre los decimales de un método a otro, todos llegan a valores muy cercanos entre sí, aunque por el comportamiento de los datos si es posible identificar métodos que funcionan mejor que otros.
+  2. A pesar de que los rendimientos en las 20 emisoras no cumplieron la normalidad mediante un test como el de Kolmogorov Smirnov es un método que se puede ocupar ya que hay muchas observaciones.
+  3. Para el de SM Laplace se cumple que los rendimientos si presentan resultados altos en el coeficiente de curtosis, por lo que este método si nos puede servir para no subestimar las pérdidas.
+  4. En el SM Boostrapping se tiene la ventaja que las características de la distribución empíricas se mantienen (observar los histogramas), y también en términos de la convergencia es el que más se aproxima al de los históricos.
+  5. Por otro lado, es bueno considerar el caso donde el comportamiento más reciente de los rendimientos es el que tiene una mayor probabilidad de ocurrir, y con el parámetro que se propuso se puede observar que es el que tiene los resultados más altos para el VaR
+  6. De las 20 emisoras se debe tener cuidado si hay movimientos fuertes en los precios si se trata de Netflix o de Costco porque son las que manejan los valores más altos de toda la cartera de acciones, por lo que el volumen de acciones que se le inviertan debe tomarse en cuenta.
+  
+Entrando a lo que ocurre con el Portafolio de Inversión que es el comportamiento en conjunto de todas las emisoras se puede ver que aplicando los métodos de una convergencia con la Simulación Montecarlo si se parecen mucho los resultados pero se alejan de lo que se obtuvo mediante el método histórico. Mientras que para el Alisado Exponencial es donde la pérdida máxima nuevamente toma el valor más elevado. Es decir, los supuestos en los rendimientos para el portafolio si afectan en mayor medida a los resultados.
+
+\newpage
+
+# MODELOS PARAMÉTRICOS
+
+Por como está programado se necesita convertir los rendimientos a una matriz
+
+```{r}
+# Matriz de Rendimientos
+rend<-as.matrix(rendimientos)
+n<- ncol(precios) #numero de emisoras
+m<-length(precios$ABT) #numero de días
+dl<-precios #Para hacer un ajuste de compatibilidad en lo programado
+```
+
+## VaR PARAMÉTRICO
+
+El VaR paramétrico es un método para calcular el riesgo de mercado de una inversión o cartera de activos, utilizando una distribución normal para los rendimientos y parámetros como la volatilidad y la media histórica. En esencia, estima la pérdida máxima esperada con un cierto nivel de confianza durante un periodo de tiempo dado. Se basa en los siguientes supuestos:
+
+- Distribución normal de los rendimientos: Asume que los rendimientos de los activos siguen una distribución normal, lo que permite calcular la desviación estándar y utilizarla en las fórmulas para calcular el VaR. 
+
+- Volatilidad y correlación constantes: Asume que la volatilidad y la correlación entre los activos permanecen constantes durante el período de tiempo considerado. 
+
+- Parámetros estimados: Utiliza parámetros estimados, como la volatilidad y la correlación histórica, para calcular el VaR. 
+
+El modelo paramétrico que determina el VaR de una posición con un solo activo es el siguiente:
+
+$$ 𝑉𝑎𝑅 = 𝐹 × 𝑆 × 𝜎 × \sqrt{t}$$
+Donde:
+
+- F = Factor que determina el nivel de confianza del modelo. Este factor es el percentil de una distribución normal N(0,1) tal que: ϕ^(F) = p.
+- S = Monto total de la exposición al riesgo
+- σ = Desviación estándar de los rendimientos de activo
+- t = Horizonte de tiempo en que se va a calcular el VaR
+
+
+### **Función para sacar el VaR parametrico**
+```{r}
+VaR_Par<-function(conf_v,dias){
+  # Matriz para guardar los resultados
+  resultados <- matrix(NA, nrow = length(dias), ncol = length(conf_v) * n)
+volatilidad<-c()
+  for(j in 1:n){
+  volatilidad[j]<-sd(rend[,j])
+  }
+   # Loop anidado por días y nivel de confianza
+  for (i in seq_along(dias)) {
+    t <- dias[i]
+    fila <- c()
+    for (conf in conf_v) {
+      f <- qnorm(conf, 0, 1)
+      VaRp <- dl[m, ] * f * volatilidad * sqrt(t)
+      fila <- c(fila, VaRp)
+    }
+    resultados[i, ] <- fila
+  }
+
+
+
+
+
+
+# Poner nombres bonitos a columnas
+  nombres_col <- c()
+  
+  for (conf in conf_v) {
+    
+    for (nombre_activo in colnames(dl)) {
+      
+      nombres_col <- c(nombres_col, paste0(nombre_activo, "_", conf*100, "%"))
+      
+    }
+  }
+  
+  # Crear el data.frame final
+  df_resultado <- data.frame(Dias = dias, resultados)
+  
+  colnames(df_resultado)[-1] <- nombres_col
+  
+  return(df_resultado)
+ 
+}
+
+```
+
+
+```{r}
+resultado_final <- data.frame()  # Inicializa fuera del for
+
+dias <- c(1, 7, 15, 30, 60, 90, 180)
+
+conf_v <- c(0.95, 0.97, 0.99)
+
+for (i in seq_along(dias)) {
+  
+  fila <- VaR_Par(conf_v, dias[i])  # calcula la fila
+  
+  resultado_final <- rbind(resultado_final, fila)  # acumula
+  
+}
+
+kable(head(resultado_final[1:5]),align="cccccc")
+```
+
+```{r}
+kable(head(resultado_final[5:10]),align="cccccc")
+```
+
+```{r}
+kable(head(resultado_final[10:15]),align="cccccc")
+```
+
+```{r}
+kable(head(resultado_final[16:21]),align = "cccccc")
+```
+
+
+\newpage
+
+### Funcion para graficar los VaR
+
+Para hacer mucho más facil el desglose de información, y de igual manera representarlo visualmente, decidimos graficar el comportamiento de los VaR en cada uno de los escenarios planteados, dado los días con su respectivo nivel de confianza, y viceversa, entonces:
+
+```{r}
+
+# Función para graficar una acción
+
+
+graficar_VaR_accion <- function(nombre_accion) {
+  
+  niveles_confianza <- c("95%", "97%", "99%")
+  
+  # Creamos un data frame temporal para la acción
+  
+  datos <- data.frame(
+    Dias = rep(resultado_final$Dias, times = length(niveles_confianza)),
+    VaR = c(resultado_final[[paste0(nombre_accion, "_95%")]], 
+            resultado_final[[paste0(nombre_accion, "_97%")]], 
+            resultado_final[[paste0(nombre_accion, "_99%")]]),
+    Confianza = factor(rep(niveles_confianza, each = nrow(resultado_final)))
+  )
+  
+  # Graficamos
+  
+  ggplot(datos, aes(x = Dias, y = VaR, color = Confianza)) +
+    geom_line(linewidth = 1) +
+    geom_point(linewidth = 2) +
+    labs(
+      title = paste("Evolución del VaR para", nombre_accion),
+      x = "Días",
+      y = "VaR",
+      color = "Nivel de Confianza"
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(plot.title = element_text(hjust = 0.5))
+}
+
+```
+
+\newpage
+
+### Análisis de VaR de cada emisora a los días establecidos y con su respectiva confianza
+
+### **ABT**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+ graficar_VaR_accion("ABT")
+```
+
+El VaR de **ABT** crece de forma bastante lineal conforme aumentan los días, sin grandes saltos. Esto nos quiere decir que **ABT** tiene una volatilidad estable y no se ve afectada de forma desproporcionada a largo plazo. Ahora, el VaR de 99% al VaR de 97% o al de 95% no está tan separado, lo cual indica que es **una señal de menor riesgo extremo**. **ABT** parece ser una acción de riesgo moderado y confiable en el tiempo,**no altamente volátil**.  
+
+### **AMD**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_accion("AMD")
+```
+
+El VaR de **AMD** se muestra mucho más sensible al número de días conforme aumentan los días, el VaR crece de forma más acelerada. Hay mucho más separación entro los VaR de 95%,97% y 99% lo que indica un **riesgo extremo más alto**. **AMD** es muy volátil, algo común en empresas de tecnologia, por eso el VaR aumenta cada que se aumenta el horizonte de tiempo.
+Puede compararse en algun snrtudo con GOOGL, AMZN y AVGO que veremos adelante
+\newpage
+
+### **GOOGL**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_accion("GOOGL")
+```
+El vaR de **GOOGL** presenta un incremeto moderado del VaR conforme aumnetan los días, menos pronunciado que **AMD** (la anterior). Hay separación entre niveles de confianza , pero no es extrema, eso indica un riesgo acumulado. Tiene una volatilidad baja a media, esto gracuas a que es una **mega-cap tecnológica**, eso quiere decir que es confiable, relativamente estable, adecuada para llevar horizontes largos.
+
+
+### **AMZN**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_accion("AMZN")
+
+```
+El VaR de **AMZN** muestra un incremeto moderado a alto del VaR conforme aumetan los días.Indica mucho más sensibilidad al horizonte de tiempo.La separación entre niveles de confianza es pronunciada, especialmente en horizonte largos, lo cual nos dice que puede enfrentar **riesgos extremos**. Tiene media a alta volatilidad consistente con su perfil de empresa tecnológica.
+\newpage
+
+### **AXP**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_accion("AXP")
+
+```
+El VaR de **AXP** muestra un incremento moderado con el tiempo. El crecimiento es bastante estable, sin saltos bruscos, lo cual es típico de una empresa financiera sólida. La separación  entre niveles de confianza es moderada, indicando que aunque hay riesgo extremo, no es tan severo como en tecnológicas o industriales más volátiles.**AXP** presenta volatilidad baja-media, apropiada para portafolios de exposición al sector financiero con un riesgo relativamente controlado.
+
+### **AVGO**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_accion("AVGO")
+
+```
+El VaR de **AVGO** presenta un incremento constante y pronunciado en el VaR conforme aumentan los días, más marcado que en acciones tipo GOOGL.La separación entre niveles de confianza es amplia, indicando que los eventos extremos pueden impactar fuertemente el valor.Muestra alta volatilidad, coherente con su perfil de empresa tecnológica de semiconductores, aunque de gran tamaño.**AVGO** es una acción riesgosa comparada con otros gigantes tech
+\newpage
+
+### **CAT**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_accion("CAT")
+
+```
+El VaR de **CAT** tiene un incremento bastante lineal con los días. Es menos explosivo que en las tecnológicas, pero más fuerte que en consumo básico. La separación de niveles de confianza es clara, mostrando que puede haber riesgos extremos relevantes, aunque no excesivos.Su volatilidad es media, propia de un sector industrial cíclico como maquinaria pesada.**CAT** es una acción cíclica que funciona bien en expansiones económicas, pero su VaR sugiere que hay que vigilarla en épocas de recesión.
+
+### **CB**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_accion("CB")
+```
+El VaR de **CB** muestra un incremento muy moderado con el tiempo. La pendiente de crecimiento es baja, indicando gran estabilidad.La separación entre niveles de confianza es pequeña, lo que sugiere muy bajo riesgo de eventos extremos. Su volatilidad baja, típica de aseguradoras bien diversificadas y consolidadas.**CB** es una acción muy estable, excelente para estrategias conservadoras que priorizan preservación de capital.
+\newpage
+
+### **COST**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_accion("COST")
+```
+El VaR de **COST** presenta un incremento moderado , aunque el nivel absoluto de VaR es relativamente alto, probablemente por su exposición a consumo masivo.La separación de niveles de confianza es moderada, no es preocupante pero sí hay algo de **riesgo extremo**.Su **volatilidad es media**, aunque para ser retail, **COST** es uno de los más estables gracias a su modelo de membresías.
+
+
+### **XOM**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_accion("XOM")
+```
+**XOM** tiene un incremento moderado a fuerte del VaR, sobre todo a plazos más largos.La separación entre niveles de confianza es notoria, reflejando exposición al riesgo de commodities (precios del petróleo). Su volatilidad es de media a alta, típica en empresas energéticas que dependen del ciclo de precios internacionales.Es una apuesta a la energía tradicional, buena para portafolios diversificados que acepten cierta volatilidad por el potencial de retornos.
+\newpage
+
+### **Home Depot, Inc.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_accion("HD")
+```
+
+El Valor en Riesgo (VaR) de HD al 99% muestra un incremento notable, alcanzando pérdidas de hasta $120 por acción en un horizonte de 180 días. Aunque esto representa solo un 1.71% del precio actual de la acción (alrededor de $7,000), existen estrategias más eficientes para esta compañía. Dado el descenso del 13.6% en el último semestre, no se recomienda esta inversión para un portafolio a largo plazo.
+
+### **Intel Corporation.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_accion("INTC")
+```
+
+Intel es una de las acciones más volátiles del portafolio, aunque presenta una pérdida potencial baja, con un máximo estimado de $14 por acción. Su bajo precio la hace accesible, pero los riesgos del sector tecnológico, junto con la fuerte competencia (como NVIDIA o ASUS), la convierten en una inversión situacional. Se recomienda comprar en momentos de baja y vender tras repuntes.
+\newpage
+
+### **JP Morgan Chase & Co.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_accion("JPM")
+```
+
+A pesar de tener horizontes marcados entre confianzas, JPM es de las acciones más estables al pertenecer nuclearmente a este mercado, esto les ha servido en temas de retail, al ser una empresa dedicada a los planes de inversión, ofrecen información de mercado clara y procesable en la que se confía en todo el mundo, identificando riesgos y oportunidades, lo que ha hecho que en el último año tengan un rendimiento del 45%, perfecta para un plan a largo plazo.
+
+### **Meta Platforms, Inc.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_accion("META")
+```
+
+Meta, a pesar de su volatilidad en el corto plazo, se muestra como una acción estable para el largo plazo. Las pérdidas entre 90 y 180 días rondan los $70, lo cual es moderado considerando su precio cercano a $600. En un entorno cada vez más digital, su enfoque en realidad virtual y el respaldo de promesas recientes de Mark Zuckerberg han impulsado un rendimiento del 26% en el último año. Tras recuperarse de controversias pasadas, se recomienda mantener esta acción en portafolios de largo plazo.
+\newpage
+
+### **Netflix, Inc.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_accion("NFLX")
+```
+
+Netflix presenta uno de los horizontes más definidos entre periodos, con pérdidas cercanas al 2% por acción. Su volatilidad está ligada a la recepción de sus contenidos, lo que la hace más dependiente de sus productos que compañías como Costco o Walmart. Tras un declive post-pandemia, la empresa ha cambiado su modelo, apostando por la producción propia y alianzas estratégicas, como la reciente con WWE. A largo plazo, se perfila como una opción estable, con pérdidas relativamente bajas en proporción a su precio.
+
+### **NVIDIA Corporation.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_accion("NVDA")
+```
+
+NVIDIA destaca como la mejor opción del portafolio a largo plazo, con volatilidad media y pérdidas actuales cercanas al 4%. Su caída reciente del 23% representa una buena oportunidad de compra. A corto plazo no es ideal debido a factores tanto del mercado como políticos, pero en un horizonte de tres años ha mostrado un impresionante rendimiento del 1125%. Líder en varios sectores y con clientes como Microsoft, Tesla y Meta, además de alianzas estratégicas con empresas de riesgo, NVIDIA es una inversión altamente recomendable para el largo plazo.
+\newpage
+
+### **Oracle Corporation.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_accion("ORCL")
+```
+
+Oracle tiene una volatilidad marcada, con un riesgo medio, a pesar de que sus horizontes y pérdidas no son tan grandes, en general no tiene un buen rendimiento, en el último semestre, ha decaído un 23%, por lo que no es una buena idea para empezar un portafolio o para un minorista, sumando a lo competitivo de su sector y una deuda de 73600 millones, se recomendaría un análisis más extenso para considerarlo dentro del portafolio. 
+
+### **Pfizer, Inc.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_accion("PFE")
+```
+
+Tras la pandemia, Pfizer ha decaído considerablemente, indicando una posible infravaloración de la compañía, tiene pérdidas mínimas debido a la industria en la que se encuentra, con un precio barato a comparación de otras, podría ser una buena idea comprar aprovechando la baja que tiene, perfecto para aquellos que buscan ingresos por dividendos y potencial de crecimiento a largo plazo, esperando un alza del precio gracias a sus continuas fusiones con otras farmacéuticas, tales como UpJohn o Parke Davis; dependencia de medicamentos clave, algunas regulaciones que los afecte o incluso temas políticos. 
+\newpage
+
+### **T-Mobile US, Inc.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_accion("TMUS")
+```
+
+T-Mobile tiene una volatilidad marcada debido a su industria de red móvil, a pesar de eso, no tiene pérdidas pronunciadas, con aprox. 1.8% en 180 días, la compañía ha superado las expectativas de ganancias y posiblemente tenga un mejor posicionamiento dentro del mercado, incursionando en servicios como la banda ancha y servicios de internet, lo que lo hace perfecto para el largo plazo, su rendimiento de 62% en el último año es una bandera verde para la inversión en esta compañía, indicando un auge y por ende, mejoría a su precio.    
+
+### **Walmart, Inc.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_accion("WMT")
+```
+
+Es uno de los minoristas más grandes del mundo, una compañía mundialmente conocida, lo que le ha valido en un rendimiento que incluso supera el S&P 500, en los últimos 10 años, Walmart ha ganado casi un 270%, mientras que el S&P 500 ha avanzado aproximadamente un 160%; el único problema es su volatilidad, es una industria muy variada, por lo que cualquier incidente afecta su reputación, tan solo en el último semestre, ha tenido bastantes altibajos y recuperaciones, se recomendaría buscar una oportunidad para comprar y mantener las acciones a largo plazo.
+
+\newpage
+
+## VaR PARAMÉTRICO PARA UN PORTAFOLIO DE INVERSIÓN
+
+Matriz de varianza y covarianza
+```{r}
+c<- var(rend)
+kable(head(c[,1:10],10),align = "cccccc")
+```
+```{r}
+cc<- cor(rend)
+kable(head(cc[,1:10],10))
+```
+
+
+```{r}
+acciones<-rep(1000,n)
+d2<-matrix(data=NA,nrow=m,ncol=n)
+
+```
+
+**Matriz de precios**
+```{r}
+for( j in 1:n){
+  for( k in 1:m ){
+    d2[k,j]<- dl[k,j]*acciones[j]
+  }
+}
+```
+**Peso de las emisoras**
+```{r}
+q<-c() #Peso de cada emisora en el portafolio
+for(j in 1:n){
+  q[j]<-d2[m,j]/sum(d2[m,])
+}
+```
+**Varianza del portafolio**
+$$ Var(x)= Q*Sigma*t(Q)$$
+
+
+Ahora el VaR
+
+```{r}
+VaR_Portafolio <- function(conf_v, dias) {
+  q <- as.matrix(q)  # Asegura que q sea matriz
+  resultados <- data.frame()
+
+  # Varianza y volatilidad del portafolio
+  varianza.port <- t(q) %*% c %*% q
+  volatilidad.port <- sqrt(varianza.port)
+
+  for (t_i in dias) {
+    fila <- c()
+    for (conf in conf_v) {
+      f <- qnorm(conf, 0, 1)
+      VaR <- sum(d2[m, ]) * f * volatilidad.port * sqrt(t_i)
+      fila <- c(fila, VaR)
+    }
+    resultados <- rbind(resultados, c(t_i, fila))
+  }
+
+  # Poner nombres a las columnas
+  nombres_col <- c("Dias", paste0("VaR_", conf_v * 100, "%"))
+  colnames(resultados) <- nombres_col
+
+  return(resultados)
+}
+
+```
+
+
+
+
+```{r}
+conf_v <- c(0.95, 0.97, 0.99)
+dias <- c(1, 7, 15, 30, 60, 90, 180)
+
+VaR_Port<-VaR_Portafolio(conf_v, dias)
+kable(head(VaR_Port,20),align="cccccc")
+
+```
+
+Como se espera en el portafolio, el VaR aumenta conforme se amplía el horizonte temporal y es proporcional al riesgo, más no en el tiempo, esto debido a las limitaciones que tiene el VaR paramétrico respecto asumir la normalidad y subestimar la pesadez de las colas, también puede deberse a que el cálculo incorpora la regla de la raíz cuadrada del tiempo, parece tener una volatilidad significativa, dado el rápido crecimiento que se observa. El portafolio muestra una exposición significativa, con pérdidas potenciales superiores a $2.3 millones en un horizonte de 180 días con 99% de confianza. 
+
+
+
+## **VaR DELTA NORMAL**
+
+El VaR Delta Normal combina el enfoque paramétrico (o de varianza-covarianza) con una aproximación lineal de las sensibilidades del portafolio, es una versión simplificada del VaR paramétrico que asume:
+
+- Distribución normal de los rendimientos: Los cambios en los factores de riesgo (como precios de activos, tasas de interés, etc.) siguen una distribución normal multivariada.
+
+- Aproximación lineal: Las variaciones en el valor del portafolio se aproximan utilizando derivadas de primer orden (deltas), lo que es válido para movimientos pequeños en los factores de riesgo.
+
+Es rápido y eficiente para portafolios lineales y no es costoso de simular a comparación del Montecarlo; por otro lado, subestima el riesgo de ambas colas al suponer la dist. normal y puede llegar a ser inexacta para ciertos instrumentos, como las opciones.
+
+
+Para el proceso ocupamos la tabla del anterior ejercicio y de igual manera los rendimientos para no hacer un doble proceso
+
+
+```{r}
+calcular_VaR_DN <- function( niveles_conf, tiempos, acciones = 1000) {
+  n_activos <- ncol(rend)
+  resultados <- list()
+
+  for (conf in niveles_conf) {
+    f <- qnorm(1-conf, mean = 0, sd = 1)
+
+    for (t in tiempos) {
+      fila <- c()
+      for (j in 1:n_activos) {
+        media <- mean(rend[, j], na.rm = TRUE)
+        vol <- sd(rend[, j], na.rm = TRUE)
+        precio_actual <- dl[nrow(dl), j]  # Último precio
+        VaR <- acciones * precio_actual * (media * t + vol * f * sqrt(t))
+        fila <- c(fila, VaR)
+      }
+
+      nombres <- colnames(dl)
+      nombres_conf <- paste0(nombres, "_", conf * 100, "%_", t, "d")
+      resultados[[paste0("conf ", conf, "_t", t)]] <- setNames(fila, nombres)
+    }
+  }
+
+  # Convertir a data frame
+  df_resultados <- do.call(rbind, resultados)
+  return(as.data.frame(df_resultados))
+}
+
+```
+
+```{r}
+niveles_conf <- c(0.95, 0.97, 0.99)
+tiempos <- c(1, 7, 15, 30, 60, 90 , 180 )
+
+VaRs <- calcular_VaR_DN( niveles_conf, tiempos)
+kable(head(VaRs[,1:7],7),align="cccccc")
+
+```
+
+
+### Análisis del VaR Delta-Normal para cada acción
+
+```{r}
+graficar_VaR_DN <- function(df, accion) {
+  # Agregar los rownames como columna para poder manipularlos
+  df <- df %>%
+    mutate(ID = rownames(df)) 
+  
+  # Separar 'confianza' y 'tiempo' en columnas distintas
+  df <- df %>%
+    separate(ID, into = c("Confianza", "Tiempo"), sep = "_t") %>%
+    mutate(
+      Confianza = case_when(
+        Confianza == "conf 0.95" ~ "95%",
+        Confianza == "conf 0.97" ~ "97%",
+        Confianza == "conf 0.99" ~ "99%",
+        TRUE ~ Confianza
+      ),
+      Tiempo = as.numeric(Tiempo)
+    )
+  ggplot(df, aes(x = Tiempo, y = .data[[accion]], color = Confianza)) +
+    geom_line(size = 1.2) +
+    geom_point(size = 2) +
+    labs(
+      title = paste("VaR Delta Normal -", accion),
+      x = "Días",
+      y = "Valor en Riesgo (VaR)",
+      color = "Confianza"
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      legend.position = "top"
+    )
+}
+
+```
+
+
+### **ABT**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_DN(VaRs,"ABT")
+```
+El VaR de **ABT** aumenta consistentemente a medida que aumentan los días como es esperado, a mayor exposición = mayor riesgo acumulado), el crecimiento es moderado , lo que indica relativa estabilidad, áun asi vemos que son perdidas grandes, pero es contemplando que tenemos 1000 acciones, asi que por eso mismo podemos decir que es u  riesgo controlado.
+
+
+
+### **AMD**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_DN(VaRs, "AMD")
+```
+El VaR de **AMD** sube mucho más rapido que en ABT al aumentar los días, se observa una alta sensibilidad al nivel de confianza: entre 95% y 99%, los valores crecen notablemente.Aún asi podemos ver que refleja la naturaleza volátil del sector tecnológico y de semiconductores.Es una ación muy riesgosa.
+\newpage
+
+### **GOOGL**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_DN(VaRs, "GOOGL")
+```
+El VaR de **GOOGL** es alto en todos los horizontes de tiempo, pero el crecimiento es relativamente lineal y predecible. Tiene cierta estabilidad relativa dentro del sector tecnológico (menos riesgo que AMD).La diferencia entre 95% y 99% sí es notoria, aunque no tan dramática como en AMD.
+
+
+### **AMZN**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_DN(VaRs, "AMZN")
+```
+El VaR de **AMZN** bastante alto en todos los plazos y niveles de confianza.El crecimiento del riesgo con el tiempo es pronunciado, similar a GOOGL pero ligeramente más volátil.Es una acción de alto riesgo.
+\newpage
+
+### **AXP**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_DN(VaRs, "AXP")
+```
+El VaR de **AXP** sube, pero de forma menos pronunciada que en Amazon o AMD.El sector financiero tiene riesgos importantes, pero AXP muestra buena contención del VaR.El salto entre 95% y 99% es menor comparado con tecnológicas.Es una acción moderadamente estable.
+
+### **AVGO**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_DN(VaRs, "AVGO")
+```
+El VaR de **AVGO** elevado y sensible a aumentos en días y confianza.Comportamiento similar a AMD (alta volatilidad), aunque un poco menos extremo.Amplias diferencias entre niveles de confianza.Es una acción de alto riesgo.
+\newpage
+
+### **CAT**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_DN(VaRs, "CAT")
+```
+El VaR de **CAT** crece gradualmente, sin saltos violentos.Sensibilidad moderada al cambio de confianza.Acción ligada al sector industrial: muestra resiliencia en comparación con tecnológicas.Acción robusta, nos ayuda al perfil conservador.
+
+### **CB**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_DN(VaRs, "CB")
+```
+El VaR de **CB** es estable en el tiempo. Cambios entre 95%, 97% y 99% no son tan fuertes es decir baja sensibilidad al nivel de confianza.Refleja la naturaleza estable del sector asegurador.Es una acción del tipo defensiva, para conservar.
+\newpage
+
+### **COST**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_DN(VaRs, "COST")
+```
+El VaR de **COST** moderadamente alto, pero crecimiento predecible y ordenado.El riesgo aumenta de forma constante con los días.Menor sensibilidad al nivel de confianza que empresas como AMD o AVGO.Es una acción estable.
+
+
+
+### **XOM**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_DN(VaRs, "XOM")
+```
+El VaR de **XOM** es relativamente elevado.El crecimiento con días es fuerte, pero elástico al nivel de confianza.Relacionado al riesgo propio de las materias primas (petróleo). Acción de riesgo medio-alto.
+\newpage
+
+### **Home Depot, Inc.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_DN(VaRs,"HD")
+```
+
+Como en otras acciones, aquí se aprecia que, a excepción del horizonte de 180 días, los demás tienen resultados más congruentes, donde las pérdidas máximas para 90 días van desde los 88000 hasta los 125000, donde por otro lado, en un horizonte de 180 días, las pérdidas máximas van desde los 126000 hasta los 177000 aprox, valores que se alejan mucho de la realidad.  
+
+### **Intel Corporation.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_DN(VaRs,"INTC")
+```
+
+En este gráfico se puede observar que las pérdidas máximas son bastante bajas, confirmando el análisis del VaR paramétrico, donde en caso de comprar acciones por un valor aprox. de 400000, se perdería a lo más $15000 en un horizonte de 90 días al 99% de confianza, lo que representa poco menos del .4%, haciéndola la acción con menor riesgo del portafolio.
+\newpage
+
+### **JP Morgan Chase & Co.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_DN(VaRs,"JPM")
+```
+
+JPM muestra tener una de las menores pérdidas en relación precio-pérdida, el valor del activo es de poco más de $4500 y en el caso hipotético de comprar 1000 acciones (como en este portafolio), se perderían un máximo de $1400000 contra los cuatro millones y medio (En peso MXN) de la inversión, una de las acciones más rentables dentro del portafolio.
+
+### **Meta Platforms, Inc.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_DN(VaRs,"META")
+```
+
+Meta parece no estar nivelada respecto al precio de su acción y las pérdidas máximas, ya que estas representan en un horizonte de 90 días al 95% de confianza el 36% del precio por 1000 acciones, un número bastante alto para lo que uno paga, claro que esto es en el peor de los casos, todavía se recomienda comprar para largo plazo, pero vender tan pronto la acción empiece a perder fuerza y se acerque al VaR del 95%.  
+\newpage
+
+### **Netflix, Inc.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_DN(VaRs,"NFLX")
+```
+
+Netflix tiene una buena relación precio-pérdida, las pérdidas en horizontes menores no representan mucho riesgo como con otras acciones, tomemos Meta, que tuvo pérdidas similares a Netflix y su acción vale la mitad; en el peor de los casos (99% de confianza), si se invierte en Netflix se puede perder la mitad del dinero invertido, a pesar de eso, es demasiado redituable, recalcando lo buena opción que es para el portafolio, en caso de decaer, el VaR en 97% parece ser el límite justo, ya que el riesgo lo vale, anteriormente ha tenido periodos de declive que se recuperan con mucha fuerza, lo que uno podría aprovechar para comprar más acciones.
+
+### **NVIDIA Corporation.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_DN(VaRs,"NVDA")
+```
+
+Vemos que tanto en el horizonte del 95% y 97% el riesgo llega a mantenerse, estables una vez superados los 90 días, sus pérdidas no son muchas, esto se debe al momento que está pasando la acción, perfecta para la compra, una vez NVIDIA se vuelva a estabilizar, es posible que las pérdidas aumenten; el anuncio de nuevos productos, anuncios de competidores, etc, pueden afectar su rendimiento y en casos particulares, el valor de una empresa.
+\newpage
+
+### **Oracle Corporation.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_DN(VaRs,"ORCL")
+```
+
+Notemos que las pérdidas no son tan pronunciadas, lo que implica menos riesgo a largo plazo, los dos primeros horizontes son muy cercanos, por lo que una idea respecto a este VaR es configurarlo hasta el 97%, asumiendo casi el mismo riesgo y con la esperanza de mejores rendimientos a largo plazo. 
+
+### **Pfizer, Inc.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_DN(VaRs,"PFE")
+```
+
+En esta gráfica podemos observar pérdidas muy pronunciadas, casi en diagonal, a pesar de que los horizontes sean cortos, no hay mucho por rescatar si uno se arriesga a muchas pérdidas potenciales, se recomendaría permanecer en el 95% de confianza, en caso de una sobrevaloración de las acciones, actualmente se les considera una posible infravaloración de la compañía, ya que sigue teniendo un riesgo medio al invertir a largo plazo.
+\newpage
+
+### **T-Mobile US, Inc.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_DN(VaRs,"TMUS")
+```
+
+Como se ha mencionado, T-Mobile tiene un gran rendimiento y es una buena opción para invertir en el portafolio, notemos que sus pérdidas no son pronunciadas y de igual forma, los primeros dos horizontes de tiempo están cerca, lo que puede darnos más margen de riesgo y una posibilidad para ganar más dinero a pesar de las posibles pérdidas.
+
+### **Walmart, Inc.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_DN(VaRs,"WMT")
+```
+
+Notemos que Walmart tiene pérdidas un poco pronunciadas pero que valen la pena por lo que cuesta la acción, combinada con su volatilidad, podría terminar en más pérdidas, pero al no llegar ni a la mitad del valor de un stack de 1000 acciones, como se propone en el modelo y, considerando que estas pérdidas son el peor caso posible, se concluye que es de las mejores acciones para invertir en el modelo.  
+\newpage
+
+
+
+## **VaR CORNISH FISHER**
+
+El VaR Cornish-Fisher es una extensión del VaR paramétrico que ajusta los percentiles de la distribución normal para incorporar los efectos de asimetría y curtosis en los rendimientos. Esto lo hace más preciso cuando los datos financieros presentan colas más gruesas o sesgos. Utiliza una expansión de series para modificar los cuantiles de la distribución normal estándar, incorporando momentos de orden superior.
+
+$$ W_{\alpha} = -\frac{1}{\alpha \sqrt{2\pi}} e^{-\frac{1}{2}(z_{\alpha})^2} \left[ 1 + z_{\alpha} \left(\frac{S}{6}\right) + \left(1 - 2z_{\alpha}^2\right) \left(\frac{S^2}{36}\right) + \left(-1 + z_{\alpha}^2\right) \left(\frac{K}{24}\right) \right] $$
+
+```{r}
+
+VaR_CF <- function(niveles_conf, tiempos, acciones = 1000) {
+  n_activos <- ncol(rend)
+  resultados <- list()
+
+  for (conf in niveles_conf) {
+    f <- qnorm(1-conf, mean = 0, sd = 1)
+
+    for (t in tiempos) {
+      fila <- c()
+      for (j in 1:n_activos) {
+        media <- mean(rend[, j], na.rm = TRUE)
+        vol <- sd(rend[, j], na.rm = TRUE)
+        s <- skewness(rend[, j], na.rm = TRUE)
+        k <- kurtosis(rend[, j], na.rm = TRUE)
+
+        # Ajuste Cornish-Fisher
+        w <- f + (f^2 - 1)*(s/6) + (f^3 - 3*f)*(k/24) - (2*f^3 - 5*f)*(s^2/36)
+
+        precio_actual <- dl[nrow(dl), j]  # Último precio disponible
+        VaR <- acciones * precio_actual * (media * t + vol * w * sqrt(t))
+        fila <- c(fila, VaR)
+      }
+
+      nombres <- colnames(dl)
+      nombres_conf <- paste0(nombres, "_", conf * 100, "%_", t, "d")
+      resultados[[paste0("conf", conf, "_t", t)]] <- setNames(fila, nombres)
+    }
+  }
+
+  # Convertir a data frame final
+  df_resultados <- do.call(rbind, resultados)
+  return(as.data.frame(df_resultados))
+}
+
+```
+
+```{r}
+niveles_conf <- c(0.95, 0.97, 0.99)
+tiempos <- c(1, 7, 15, 30, 60, 90 , 180 )
+
+VaRCF <- VaR_CF(niveles_conf, tiempos)
+kable(head(VaRCF[,1:7],7),align="cccccc")
+```
+
+### Análisis de VaR Cornish Fisher de cada emisora a los días establecidos y con su respectiva confianza
+```{r}
+graficar_VaR_CF <- function(df, accion) {
+  # Agregar los rownames como columna para poder manipularlos
+  df <- df %>%
+    mutate(ID = rownames(df)) 
+  
+  # Separar 'confianza' y 'tiempo' en columnas distintas
+  df <- df %>%
+    separate(ID, into = c("Confianza", "Tiempo"), sep = "_t") %>%
+    mutate(
+      Confianza = case_when(
+        Confianza == "conf 0.95" ~ "95%",
+        Confianza == "conf 0.97" ~ "97%",
+        Confianza == "conf 0.99" ~ "99%",
+        TRUE ~ Confianza
+      ),
+      Tiempo = as.numeric(Tiempo)
+    )
+  
+  # Graficar
+  ggplot(df, aes(x = Tiempo, y = .data[[accion]], color = Confianza)) +
+    geom_line(size = 1.2) +
+    geom_point(size = 2) +
+    labs(
+      title = paste("VaR Cornish Fisher -", accion),
+      x = "Días",
+      y = "Valor en Riesgo (VaR)",
+      color = "Confianza"
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      legend.position = "top"
+    )
+}
+```
+
+\newpage
+
+
+### **ABT**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_CF(VaRCF,"ABT")
+```
+**ABT** muestra un crecimiento muy moderado en su VaR conforme aumenta el plazo; incluso al pasar de 90 a 180 días, el incremento es controlado.
+Hay buena separación entre niveles de confianza, pero no se disparan exageradamente. Volatilidad baja, típica de una empresa defensiva (sector salud).**ABT** es bastante defensiva, apta para perfiles conservadores que buscan estabilidad a mediano-largo plazo.
+
+
+### **AMD**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_CF(VaRCF,"AMD")
+```
+**AMD** presenta aumentos de VaR mucho más agresivos a medida que suben los días y los niveles de confianza. Se observa alta sensibilidad al riesgo extremo (99%), donde los valores se disparan. Volatilidad alta, característica típica de una acción de semiconductores. **AMD** es de alto riesgo y alta volatilidad; adecuada sólo para inversionistas que toleren fluctuaciones fuertes y apuestas a crecimiento.
+\newpage
+
+### **GOOGL**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_CF(VaRCF,"GOOGL")
+```
+**GOOGL** muestra un crecimiento progresivo del VaR con los días, pero sin explosiones; el aumento es más suave que en acciones como **AMD**. Separación entre niveles de confianza bien marcada pero no extrema. Volatilidad baja a media, reflejando que es una gran tecnológica estable. **GOOGL** es una acción sólida y relativamente estable, ideal para estrategias de largo plazo con control de riesgo.
+
+
+### **AMZN**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_CF(VaRCF,"AMZN")
+```
+**AMZN** muestra un patrón de VaR similar a **GOOGL**, pero con ligeramente más volatilidad hacia horizontes largos. Separación entre niveles de confianza ordenada, pero algo más pronunciada que en **GOOGL**. Volatilidad media, influida por su mezcla de e-commerce y tecnología. **AMZN** es relativamente confiable pero algo más expuesta a cambios de mercado que **GOOGL**; adecuada para horizontes medios a largos, con ligera tolerancia al riesgo.
+\newpage
+
+
+
+### **AXP**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_CF(VaRCF,"AXP")
+```
+
+**AXP** tiene un crecimiento de VaR notablemente controlado en plazos cortos, pero empieza a acelerar en plazos largos.Los niveles de confianza se separan de manera visible en 90 y 180 días.Volatilidad media, propia de una financiera cíclica.**AXP** tiene estabilidad moderada en el corto plazo, pero puede ser más vulnerable en crisis económicas; buena para inversionistas conscientes del ciclo económico.
+
+### **AVGO**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_CF(VaRCF,"AVGO")
+```
+
+**AVGO** muestra un VaR en aumento fuerte conforme crece el tiempo, aunque más controlado que **AMD**.Los saltos entre niveles de confianza son grandes en plazos largos, lo que sugiere vulnerabilidad ante eventos extremos.Volatilidad media a alta, coherente con ser tecnológica pero más consolidada.**AVGO** es de volatilidad significativa pero no caótica; ideal para quien busca exposición a tech con algo de estabilidad adicional respecto a **AMD**.
+\newpage
+
+### **CAT**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_CF(VaRCF,"CAT")
+```
+**CAT**  tiene un comportamiento de VaR ordenado en plazos cortos, pero a partir de 60-90 días el riesgo crece bastante.Hay buena separación en niveles de confianza, más notoria a 180 días.Volatilidad media, asociada a su exposición al ciclo económico (industriales).**CAT** es razonablemente estable en el corto plazo, pero sensible a cambios macroeconómicos; recomendable para quienes toleran algo de ciclicidad.
+
+### **CB**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_CF(VaRCF,"CB")
+```
+**CB** mantiene un crecimiento de VaR relativamente lineal, sin grandes saltos.La separación entre niveles de confianza es pequeña en plazos cortos, mayor en plazos largos.Volatilidad baja a media, consistente con su perfil asegurador defensivo.**CB** es una acción bastante defensiva y estable, ideal para posiciones de bajo riesgo o carteras de protección.
+\newpage
+
+### **COST**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_CF(VaRCF,"COST")
+```
+**COST** presenta un VaR que crece de forma estable y contenida, sin picos exagerados ni explosiones en 180 días.La separación de niveles de confianza es moderada y bien estructurada.Volatilidad baja a media, reflejo de su perfil de retail de consumo básico.**COST** es una acción defensiva de excelente estabilidad, perfecta para estrategias conservadoras de largo plazo.
+
+### **XOM**
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_CF(VaRCF,"XOM")
+```
+**XOM** muestra incrementos de VaR controlados en plazos cortos pero más volátiles hacia los 90-180 días.La separación en niveles de confianza es notable especialmente en 99% a largo plazo, debido a sensibilidad a precios de commodities.Volatilidad media a alta, natural por su exposición a energía y petróleo.**XOM** puede ser una buena apuesta defensiva frente a inflación, pero hay que tolerar volatilidad ligada al precio del crudo.
+\newpage
+
+### **Home Depot, Inc.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_CF(VaRCF,"HD")
+```
+
+Observamos que la brecha entre el VaR 95% y 99% refleja el impacto de las colas gruesas y asimetría en los rendimientos de Home Depot. Si la diferencia es grande, confirma que el VaR Cornish-Fisher ajusta mejor el riesgo que el VaR normal para esta acción. A excepción del VaR 99%, los horizontes de tiempo no son tan pronunciados, lo que indica que Home Depot tuvo un período relativamente estable en esos 180 días.
+
+### **Intel Corporation.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_CF(VaRCF,"INTC")
+```
+
+Notemos que las pérdidas tienen forma de diagonal, lo que implica que hay causas para que nuestra inversión en Intel se vea afectada, tales como competencia con AMD/NVIDIA y posible pérdida de cuota de mercado puede generar volatilidad, alta sensibilidad a la demanda global y escasez de suministros en su mercado. Su riesgo es moderado y con volatilidad limitada, sus pérdidas van desde los veinte a los cuarenta mil, por lo que se recomienda no supear el VaR 95%.
+\newpage
+
+### **JP Morgan Chase & Co.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_CF(VaRCF,"JPM")
+```
+
+Las líneas del VaR no muestran picos abruptos, lo que sugiere que JPM gestionó bien los riesgos, ya sea diversificando ingresos como banca, inversiones o gestión de activos, las pérdidas no muestran riesgo para la inversión del portafolio, al 97% de confianza apenas supera los $75000 de pérdidas, un riesgo dispuesto para el caso de adquirir 1000 acciones, confirmando que es una gran opción para invertir en este portafolio.  
+
+### **Meta Platforms, Inc.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_CF(VaRCF,"META")
+```
+
+Debido a que no hay picos en las pérdidas de Meta, podemos sugerir que su dist. no tiene colas pesadas, con pérdidas que al 97% apenas supera el medio millón, por lo que inclusive en el peor de los casos, no se perdería toda la inversión, otro aspecto a tener en cuenta, es la separación entre los niveles de confianza, indicando riesgos latentes o inversiones de la misma empresa, a pesar de estas posibles pérdidas y con los rendimientos que ha tenido, Meta demuestra lo fuerte y redituable que es dentro del portafolio. 
+\newpage
+
+### **Netflix, Inc.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_CF(VaRCF,"NFLX")
+```
+
+Netflix, al ser de las acciones mejor remuneradas dentro del portafolio, era de esperar que sus pérdidas no fueran significativas, en este modelo son de las más bajas en relación precio-pérdida, si hubiera días con saltos bruscos en el VaR, indicaría eventos de mercado extremos, cosa que no ha pasado para Netflix, también notemos que si hay diferencia significativa entre horizontes de confianza, por lo que se recomendaría no superar el VaR del 95% en caso de un portafolio más conservador, de otra forma, se podría considerar el de 97% 
+
+### **NVIDIA Corporation.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_CF(VaRCF,"NVDA")
+```
+
+Notemos que VaR al 99% ronda los $100000 a $150000, casi 3 veces mayor que el VaR al 95%, lo que indica que la dist. tiene colas extremadamente gruesas; Nvidia es sensible a shocks tecnológicos/regulatorios, tales como restricciones a sus productos o caidas bruscas (debido a la asimetría negativa que presenta). Al opera en un sector con mayor riesgo disruptivo, la volatilidad está muy presente, esto se puede ver con la ligera forma cóncava que realiza el VaR al 95%, indicando que las pérdidas no son lineales.
+\newpage
+
+### **Oracle Corporation.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_CF(VaRCF,"ORCL")
+```
+
+Lo primero a observar en las pérdidas de Oracle, es la gran diferencia en el horizonte a 99% de confianza, lo que indica que los rendimientos tienen distribuciones no normales, con eventos extremos más probables de lo que predice una distribución normal; en los demás horizontes de tiempo las pérdidas tienen lecturas más coherentes, al no ser tan pronunciadas, indica que Oracle tuvo un periodo de estabilidad, sumado a los rendimientos tan buenos de esta acción, concluyó en que las pérdidas fueran mínimas, recalcando lo buena opción que es para el portafolio.  
+
+### **Pfizer, Inc.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_CF(VaRCF,"PFE")
+```
+
+Notemos que las pérdidas son bajas hasta cierto horizonte de tiempo, oscilando entre los cinco y veinte mil en el peor de los casos, el riesgo es demasiado para asumirlo, incluso al 95% las pérdidas superan la mitad del stock de las 1000 acciones, especialmente, al 99% es significativamente más alto (más negativo) que los demás, lo que refleja el impacto de colas gruesas y asimetría en los rendimientos. A comparación de otras acciones, las pérdidas no muestran picos abruptos, lo que sugiere que Pfizer experimentó un período de volatilidad moderada a pesar de la continua devaluación de sus acciones.
+\newpage
+
+### **T-Mobile US, Inc.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_CF(VaRCF,"TMUS")
+```
+
+Notemos que las pérdidas en los primeros horizontes de tiempo de T-Mobile no muestra picos abruptos, lo que sugiere que TMUS no enfrentó crisis agudas en ese período, sin embargo, la amplitud entre niveles de confianza indica que riesgos latentes (como competencia agresiva o inversiones) podrían generar pérdidas excepcionales, razón por la que muestra una ligera forma cóncava. La gran diferencia entre el VaR al 95% y 99% confirma que los rendimientos de TMUS tiene asimetría negativa y curtosis elevada, lo que indica mayor probabilidad de caídas bruscas que de subidas.
+
+### **Walmart, Inc.**
+
+```{r,fig.width=5, fig.height=3, out.width="60%",warning=FALSE,message=FALSE}
+graficar_VaR_CF(VaRCF,"WMT")
+```
+
+Debido al modelo de negocios que tiene Walmart, las pérdidas que tiene se dispersan en los sectores que manejan y con los que tiene relación de negocios, los productos esenciales resisten mucho este tipo de situaciones donde haya pérdidas, estas oscilan entre los veine y treina mil para los niveles de confianza medios, esto refleja poca volatilidad en ingresos y una gestión buena en inventario, su VaR es estable y se recomienda no superar el 97% de confianza.
+
+
+# CONCLUSIÓN
+
+A lo largo de este proyecto realizamos un análisis exhaustivo de una cartera compuesta por 20 emisoras del índice S&P500, considerando el periodo comprendido entre enero de 2022 y marzo de 2025. Nuestro objetivo fue entender el comportamiento de estas acciones, estimar sus niveles de riesgo y rendimiento, y proponer una metodología adecuada para la construcción y evaluación de portafolios de inversión diversificados.
+
+El análisis exploratorio nos permitió identificar emisoras con rendimientos destacados, como Nvidia, Meta, Amazon y Broadcom, las cuales reflejaron un crecimiento notable durante el periodo analizado. Por otro lado, también observamos emisoras como Intel o Pfizer, cuyos precios mostraron comportamientos menos favorables, evidenciando la importancia de diversificar una cartera para mitigar la exposición al riesgo de activos individuales.
+
+Uno de los principales enfoques del proyecto fue la estimación del **Valor en Riesgo (VaR)**, una herramienta ampliamente utilizada en la gestión de riesgos financieros. Aplicamos tanto métodos **paramétricos**, como los basados en la distribución normal, así como métodos **no paramétricos**, tales como el VaR histórico y la simulación de Monte Carlo. El enfoque paramétrico, si bien es sencillo y computacionalmente eficiente, se basa en supuestos que rara vez se cumplen completamente en la realidad del mercado, como la normalidad de los rendimientos. En nuestro análisis, se evidenció que muchos de los activos presentan asimetrías y curtosis que limitan la confiabilidad del VaR paramétrico.
+
+En contraste, los métodos no paramétricos permitieron capturar mejor los eventos extremos y la verdadera forma de la distribución empírica de los rendimientos. El VaR histórico, al utilizar datos reales sin suposiciones sobre su distribución, se mostró especialmente útil para representar el riesgo en condiciones de mercado volátil. La simulación de Monte Carlo, aunque más exigente en términos computacionales, ofreció una aproximación flexible que permite modelar distintos escenarios futuros a partir de los patrones observados en los datos históricos.
+
+La comparación entre ambos enfoques resaltó una conclusión clave: la elección del método para calcular el VaR debe depender tanto del contexto del análisis como de las características estadísticas de los datos. Mientras que los métodos paramétricos pueden ser adecuados para análisis rápidos o preliminares, los no paramétricos resultan preferibles cuando se busca una evaluación más robusta y realista del riesgo financiero.
+
+Además del análisis de riesgo, realizamos ejercicios de optimización de portafolios considerando tanto la maximización del rendimiento esperado como la minimización del riesgo. Este ejercicio nos permitió aplicar conceptos fundamentales como la matriz de varianzas y covarianzas, el coeficiente de correlación y el principio de diversificación, todos esenciales en el diseño de estrategias de inversión informadas.
+
+En términos generales, este proyecto no solo fortaleció nuestras competencias técnicas en programación y análisis de datos utilizando R, sino que también fomentó una visión crítica sobre los métodos clásicos en finanzas. Asimismo, nos permitió desarrollar habilidades para interpretar y comunicar hallazgos cuantitativos, un aspecto clave en el trabajo profesional de quienes se desempeñan en el ámbito financiero y actuarial.
+
+Finalmente, consideramos que este tipo de análisis constituye una base sólida para tomar decisiones de inversión fundamentadas en datos y evidencia. Como equipo, reconocemos la importancia de seguir explorando herramientas estadísticas avanzadas y modelos más realistas que incorporen la dinámica cambiante del mercado, con el fin de construir portafolios más eficientes y resilientes ante la incertidumbre financiera.

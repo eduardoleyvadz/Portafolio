@@ -1,0 +1,2390 @@
+---
+title: "PROYECTO 2: Modelo Macroeconómico"
+subtitle: "Equipo 12"
+author:
+  - Emmanuel Bonilla Flores
+  - Marcos García Morales
+  - Alberto Hernández Galicia
+  - Eduardo Tomás Leyva Díaz
+output: pdf_document
+---
+
+# LIBRERÍAS
+
+El primer paso es activar todas las librerías necesarias para la elaboración de este proyecto, las cuales son:
+
+```{r,warning=FALSE,message=FALSE}
+# Datos de Banxico e INEGI
+library(tidyverse)
+library(jsonlite)      
+library(httr)
+
+# Funciones con Data Frames
+library(purrr)
+library(dplyr)
+
+# Leer Archivos de Excel
+library(readxl)
+
+# Visualización de Tablas y Gráficas
+library(knitr)
+library(ggplot2)
+
+# Pruebas de Estrés
+library(corrplot)
+library(goftest)   
+library(psych)
+library(glmnet)
+
+# Supuestos del Modelo
+library(lmtest)
+library(nortest)
+```
+
+Además se establece una semilla para que los resultados de la interpretación coincidan con los de los modelos de penalización al momento de ejecutar las líneas de código.
+
+```{r setup}
+# Semilla
+set.seed(123)
+```
+
+
+\newpage
+
+# DATOS
+
+Después hay que importar los datos de las Probabilidades de Incumplimiento en Tarjetas de Crédito (IMORA - PD Proxy) para los bancos BBVA, Banamex, Santander, Banorte y para el total de la banca múltiple TBM que vienen en un archivo de Excel.
+
+```{r}
+setwd("C:/Users/Eduardo Leyva/Documents/Octavo Semestre/Administración Integral de Riesgos/Riesgo de Crédito")
+PD_bancos<-read_excel("Proyecto 2.xlsx",sheet="Datos")
+kable(head(PD_bancos,10),align="cccccc",digits=2)
+```
+
+
+
+# VARIABLES MACROECONÓMICAS
+
+Se define un dataframe con dos columnas, en la primera se encuentra la abreviatura de cada variable macroeconómica propuesta con su correspondiente indicador con el que es posible obtener los datos de forma automática desde Banxico e INEGI.
+
+**NOTA: En un PDF adicional se encuentra una tabla que contiene una breve descripción de las variables propuestas.**
+
+```{r}
+abreviaturas<-data.frame(Abreviatura=c("IGAE_2018", "SMG", "TICH", "TIIE_28d","INPC_OGN",
+                                       "Bal_com","Deuda_Pub","Ing_PEMEX","IPC","Ing_Gob",
+                                       "CC_VigP","GP_SP","FMP_AT","OP_SPEI","Res_Inter",
+                                       "Prod_Ind","Inv_Fija","Merc_Burs","Remesas","TC","TIN",
+                                       "Pob_Desocupada","INPP_Pet_Serv","ICC","RMRPO",
+                                       "Act_Prim","Exp_Total","Tasa_Inflación","PEA",
+                                       "Tasa_Informalidad","Des_Sub","Prod_Priv_Par",
+                                       "May_Text_Calz","Prod_Edif","Rem_Manu","Venta_Autos",
+                                       "Desocupación_Urbana","Participación_Urbana",
+                                       "PIB","Ahorro"),
+                         Indicador=c("SR17693","SL11298","SF43426","SF283","SP30577",
+                                     "SE36566","SG193","SG123","SF4782","SG9",
+                                     "SF235704","SG1","SN4240","SF46188","SF29656",
+                                     "SR17531","SR17459","SF4801","SE27803","SF17908",
+                                     "182022","444623","673096","454168","722230",
+                                     "737122","127598","910399","444559","380713",
+                                     "444566","723376","719873","723453","723386",
+                                     "15169","444785","444782","742149","742166"))
+```
+\newpage
+```{r}
+kable(head(abreviaturas,10),align = "cc")
+```
+
+
+Para obtener la información desde los sistemas de Banxico e INEGI se establece el periodo de interés que abarca del 01 de enero de 2015 al 31 de diciembre del 2024 y serán datos con periodicidad mensual. La manera en que se obtendrán estos datos es utilizando un token y el indicador que tiene la variable para ser consultado con el código, a continuación se presenta un ejemplo:
+
+```{r}
+# Ejemplo para una Serie
+
+token<-"0ddd85b4752bbbe97f7c261e23fe599256e6d34b71b667f257bfdd3d20909555"
+serie<-"SL11298"
+
+# formato yyyy-MM-dd
+inicio<-"2015-01-01"
+fin<-"2025-01-01"
+
+# URL con la que se tiene acceso
+url <- paste0(
+  "https://www.banxico.org.mx/SieAPIRest/service/v1/series/", 
+  serie, 
+  "/datos/?token=", token)
+
+# Extraer la información
+respuesta <- GET(url)
+datos_banxico <- fromJSON(content(respuesta, "text", encoding = "UTF-8"))
+datos_banxico <- datos_banxico$bmx$series$datos[[1]]
+
+# Crear un data frame con las columnas de fecha y los datos de interés
+ejemplo<-data.frame(Fecha = parse_date(datos_banxico$fecha,"%d/%m/%Y",na = "N/E"),
+                             dato = parse_number(datos_banxico$dato,na = "N/E"))
+
+# Filtrar los datos para el periodo que se estableció
+ejemplo<-ejemplo %>%
+         filter(inicio<=Fecha) %>%
+         filter(fin > Fecha)
+
+# Cambiar el nombre de la columna por la abreviatura de la variable         
+colnames(ejemplo)<-c("Fecha",abreviaturas$Abreviatura[match(serie,abreviaturas$Indicador)])
+```
+
+
+```{r}
+kable(head(ejemplo,10),align = "cc")
+```
+
+Para no repetir este paso en todas las variables, se creó una función que recibe como argumento el indicador y devuelve como resultado el data frame con los valores del periodo establecido. Como los indicadores de las dos fuentes de información son diferentes, se creó una función para Banxico y otra para INEGI, a continuación se define cada una y se prueba con un ejemplo.
+
+**NOTA: Estas dos funciones que se mostrarán son para datos que tienen periodicidad mensual, por lo que el data frame tiene 120 observaciones o renglones, para las variables que sean trimestrales se realizará otro procedimiento.**
+
+
+```{r}
+# Función que devuelve un data frame con los datos del indicador macroeconómico
+# para el SPI de Banxico, solo se necesita el número de serie (ID).
+
+serie_datos_banxico<-function(ID_serie){
+  
+  token_banxico<-"0ddd85b4752bbbe97f7c261e23fe599256e6d34b71b667f257bfdd3d20909555"
+  
+  # formato yyyy-MM-dd
+  fecha_inicial<-"2015-01-01"
+  fecha_final<-"2025-01-01"
+
+  # URL con la que se tiene acceso a la información
+  url_banxico <- paste0(
+    "https://www.banxico.org.mx/SieAPIRest/service/v1/series/", 
+    ID_serie, 
+    "/datos/?token=", token_banxico)
+
+  # Extraer la información
+  respuesta_banxico <- GET(url_banxico)
+  flujo_datos <- fromJSON(content(respuesta_banxico, "text", encoding = "UTF-8"))
+  flujo_datos <- flujo_datos$bmx$series$datos[[1]]
+  
+  # Crear un data frame con las columnas de fecha y los datos de interés
+  datos_banxico_mensual<-data.frame(Fecha = parse_date(flujo_datos$fecha,"%d/%m/%Y",na = "N/E"),
+                             Datos = parse_number(flujo_datos$dato,na = "N/E"))
+
+  # Filtrar los datos para el periodo que se estableció
+  datos_banxico_mensual<-datos_banxico_mensual %>%
+                        filter(fecha_inicial<=Fecha) %>%
+                        filter(fecha_final > Fecha) %>%
+                        select(Datos)
+
+  # Cambiar el nombre de la columna por la abreviatura de la variable
+  colnames(datos_banxico_mensual)<-c(abreviaturas$Abreviatura[match(ID_serie,abreviaturas$Indicador)])
+  
+  # regresar el data frame con una columna,la de los datos de la variable
+  return(datos_banxico_mensual)   
+}
+```
+
+```{r}
+kable(head(serie_datos_banxico("SL11298")),align = "c")
+```
+
+
+```{r}
+# Función que devuelve un data frame con los datos del indicador macroeconómico
+# para el SPI de INEGI, solo se necesita el número(key).
+
+serie_datos_INEGI<-function(key){
+  
+token<-"02d7a14b-806d-405e-add8-0f6a387277fe"
+# formato yyyy-MM-dd
+fecha_inicial<-"2015-01-01"
+fecha_final<-"2025-01-01"
+
+# URL con la que se tiene acceso a la información
+url_INEGI <- paste0("https://www.inegi.org.mx/app/api/indicadores/desarrolladores/jsonxml/INDICATOR/",
+                      key,"/es/0700/false/BIE/2.0/",token,"?type=json")
+
+  # Extraer la información
+respuesta_INEGI <- GET(url_INEGI)
+datosGenerales<-content(respuesta_INEGI,"text")
+flujoDatos<-paste(datosGenerales,collapse = " ")
+
+# Obtención de la lista de observaciones 
+flujoDatos<-fromJSON(flujoDatos)
+flujoDatos<-flujoDatos$Series$OBSERVATIONS[[1]]
+
+# Filtrar por la fecha
+datos_INEGI<-flujoDatos %>%
+             arrange(TIME_PERIOD) %>%
+             filter(fecha_inicial<=TIME_PERIOD) %>%
+             filter(fecha_final>TIME_PERIOD) %>%
+             select(OBS_VALUE) %>%
+             mutate(OBS_VALUE=parse_number(OBS_VALUE))
+
+# Cambiar el nombre de la columna por la abreviatura de la variable
+colnames(datos_INEGI)<-c(abreviaturas$Abreviatura[match(key,abreviaturas$Indicador)])
+
+return(datos_INEGI)  # regresar el data frame con una columna, la de los datos de la variable
+}
+```
+
+```{r}
+kable(head(serie_datos_INEGI("182022")),align = "c")
+```
+
+Cuando son datos trimestrales hay que agregar una serie de pasos para realizar la interpolación, es decir, se asume que tienen un comportamiento lineal y con la función **aprox()** se calcularán los valores de los meses que faltan pasando a tener un data frame con 120 observaciones en lugar del original que trae solo 40 observaciones. De igual manera que en el paso anterior, se crea una función pero solo para INEGI debido a que la información trimestral se obtuvo solo de esa fuente.
+
+**NOTA: La función de aprox() es equivalente a la función PRONOSTICO que tiene Excel.**
+
+```{r}
+# Función para datos Trimestrales del INEGI
+
+serie_datos_INEGI_trim<-function(key){
+  
+token<-"02d7a14b-806d-405e-add8-0f6a387277fe"
+
+# formato yyyy-MM
+fecha_inicial<-"2014/04"  # Se necesita un trimestre anterior al del periodo establecido
+fecha_final<-"2025/01"
+
+# URL de acceso
+url_INEGI <- paste0("https://www.inegi.org.mx/app/api/indicadores/desarrolladores/jsonxml/INDICATOR/",
+                      key,"/es/0700/false/BIE/2.0/",token,"?type=json")
+
+# Extraer la información
+respuesta_INEGI <- GET(url_INEGI)
+datosGenerales<-content(respuesta_INEGI,"text")
+flujoDatos<-paste(datosGenerales,collapse = " ")
+
+# Obtención de la lista de observaciones 
+flujoDatos<-fromJSON(flujoDatos)
+flujoDatos<-flujoDatos$Series$OBSERVATIONS[[1]]
+
+# Filtrar por la fecha y elegir solo los datos de la variable
+datos_INEGI<-flujoDatos %>%
+             arrange(TIME_PERIOD) %>%
+             filter(fecha_inicial<=TIME_PERIOD) %>%
+             filter(fecha_final>TIME_PERIOD) %>%
+             select(OBS_VALUE) %>%
+             mutate(OBS_VALUE=parse_number(OBS_VALUE))
+
+# INTERPOLACIÓN
+
+valores<-c()  # vector para ir guardando los valores nuevos
+
+# Ciclo For para recorrer los 40 datos conocidos
+for(k in 2:length(datos_INEGI$OBS_VALUE)){
+dato_mes1<-datos_INEGI$OBS_VALUE[k-1]    # dato conocido (extremo izquierdo)
+dato_mes4<-datos_INEGI$OBS_VALUE[k]      # dato conocido (extremo derecho)  
+
+# Calcular valores de los meses intermedios usando approx
+dato_mes2<-approx(c(1,4),c(dato_mes1,dato_mes4),xout=2)$y
+dato_mes3<-approx(c(1,4),c(dato_mes1,dato_mes4),xout=3)$y
+valores<-c(valores,dato_mes1,dato_mes2,dato_mes3,dato_mes4)  # guardar los valores
+}
+valores<-unique(valores) # conservar solo los valores únicos ya que se repiten los
+                         # ya conocidos
+
+# Se tiene que eliminar el primer dato ya que es de un periodo anterior al establecido,
+# el cual es necesario para interpolar
+valores<-valores[-1]     
+
+# Crear el data frame con las 120 observaciones
+datos_INEGI_mensual<-data.frame(OBS_VALUE=valores)
+
+# Cambiar el nombre de la columna por la abreviatura de la variable
+colnames(datos_INEGI_mensual)<-c(abreviaturas$Abreviatura[match(key,abreviaturas$Indicador)])
+
+return(datos_INEGI_mensual)  # devolver el data frame
+}
+kable(head(serie_datos_INEGI_trim("380713")),align = "c")
+```
+
+\newpage
+
+Al final se junta toda la información de las variables en un solo data frame que tendrá las fechas del periodo establecido y los datos (120 observaciones) utilizando las funciones creadas y también **map_dfc**  que viene en las librerías que se importaron desde el inicio y se encarga de ir pegando la información por columnas.
+
+```{r,warning=FALSE,message=FALSE}
+# Indicadores de las Variables de Banxico (mensuales)
+indicadores_banxico<-c("SF17908","SR17693","SL11298","SF43426","SF283","SP30577",
+                                     "SE36566","SG193","SG123","SF4782","SG9",
+                                     "SF235704","SG1","SN4240","SF46188","SF29656",
+                                     "SR17531","SR17459","SF4801","SE27803")
+
+# Indicadores de las Variables de INEGI (mensuales)                                   
+indicadores_INEGI<-c( "182022","444623","673096","454168","722230",
+                                     "737122","444559","127598","910399",
+                                     "444566","723376","719873","723453","723386",
+                                     "15169","444785","444782")
+
+# Indicadores de las Variables de INEGI (trimestrales)
+indicadores_INEGI_trim<-c("742149","742166","380713")
+
+# Colocar las Fechas
+variables_macro<-data.frame(Fecha = ejemplo$Fecha)
+
+# Llenarlo por columnas
+variables_macro<-data.frame(variables_macro,
+                            map_dfc(indicadores_banxico,serie_datos_banxico),
+                            map_dfc(indicadores_INEGI,serie_datos_INEGI),
+                            map_dfc(indicadores_INEGI_trim,serie_datos_INEGI_trim))
+```
+
+```{r}
+kable(head(variables_macro[,1:6],10),align = "cccccc")
+```
+\newpage
+
+
+# TOTAL DE BANCA MÚLTIPLE
+
+Utilizando la información de los bancos que se importó al inicio se va a regresar de la PD al score usando la transformación inversa, es decir:
+$$ \mathbf{SCORE = ln(\dfrac{PD}{1-PD}})  $$
+
+Se crea un data frame que tiene el Score en vez de la PD.
+
+```{r}
+# Score para TBM
+TBM_Score<- PD_bancos %>% 
+         select(TBM) %>% 
+         mutate(TBM = log((TBM/100) / (1-(TBM / 100))))
+colnames(TBM_Score)<-"Score_TBM"
+
+kable(head(TBM_Score,10),align = "c")
+```
+## TRANSFORMACIÓN DE VARIABLES
+
+Los datos de las variables no están en la misma escala, y eso puede generar que el modelo de regresión no sea tan preciso, así que lo que se va realizar es una estandarización de toda la información, sin embargo, existen variables que requieren ser divididas entre 100 porque son porcentajes y otras en las que es recomendable aplicar el logartimo antes de la estandarización. Este procedimiento se llevará a cabo a través de funciones que realizan esas operaciones y devuelven el data frame ya transformado, solo necesita como argumento el nombre de las columnas de la tabla obtenida en el paso anterior, que en este caso son las abreviaturas de las variables. A continuación se muestra un ejemplo de cada caso.
+
+```{r}
+# Función para Estandarizar sin hacer una transformación antes
+
+estandarizacion<-function(columna){
+  # Hallar la posición de la columna
+  posicion<-match(columna,colnames(variables_macro))
+  
+  # Estandarizar los datos
+  variable_transformada<- (variables_macro[,posicion] - mean(variables_macro[,posicion])) /
+                          sd(variables_macro[,posicion])
+  # Convertirlo en data.frame
+  variable_transformada<-as.data.frame(variable_transformada)
+  
+  # Cambiarle el nombre a la columna
+  colnames(variable_transformada)<-columna
+  
+  return(variable_transformada) # regresar el data frame
+}
+kable(head(estandarizacion("TIN")),align = "c")
+```
+```{r}
+# Función para estandarizar los datos que primero están en PORCENTAJE
+porcentaje<-function(columna){
+  # Hallar la posición de la columna
+  posicion<-match(columna,colnames(variables_macro))
+  
+  # Dividir entre 100
+  variable_transformada<- variables_macro[,posicion] / 100
+  
+  # Estandarizar los Datos
+  variable_transformada<- (variable_transformada - mean(variable_transformada)) /
+                           sd(variable_transformada)
+  
+  # Convertirlo en data.frame
+  variable_transformada<-as.data.frame(variable_transformada)
+  
+  # Cambiarle el nombre a la columna
+  colnames(variable_transformada)<-columna
+  
+  return(variable_transformada) # regresar el data frame
+}
+kable(head(porcentaje("Tasa_Informalidad")),align = "c")
+```
+
+```{r}
+# Función para estandarizar los datos, pero primero se les aplica un LOGARITMO
+
+logaritmo<-function(columna){
+  # Hallar la posición de la columna
+  posicion<-match(columna,colnames(variables_macro))
+  
+  # Logaritmo
+  variable_transformada<- log(variables_macro[,posicion])
+  
+  # Estandarizar los datos
+  variable_transformada<- (variable_transformada - mean(variable_transformada)) /
+                           sd(variable_transformada)
+
+  # Convertirlo en data.frame
+  variable_transformada<-as.data.frame(variable_transformada)
+  
+  # Cambiarle el nombre de la columna
+  colnames(variable_transformada)<-columna
+  
+  return(variable_transformada) # devolver el data frame
+}
+kable(head(logaritmo("Act_Prim")),align = "c")
+```
+\newpage
+
+Nuevamente se utilizará la función **map_dfc** para ir pegando por columnas los datos transformados que arrojan las funciones
+
+```{r}
+# Variables a Estandarizar
+variables_Z<-c("TC","IGAE_2018","SMG","Bal_com","Deuda_Pub","Ing_PEMEX","IPC",
+                "Ing_Gob","INPP_Pet_Serv","ICC","RMRPO","Tasa_Inflación",
+               "Exp_Total","CC_VigP","GP_SP","FMP_AT","OP_SPEI","Res_Inter",
+               "Prod_Ind","Inv_Fija")
+
+# Variables para dividir entre 100 y estandarizar
+variables_porcentaje<-c("TICH","TIIE_28d","INPC_OGN","TIN","Pob_Desocupada",
+                        "Tasa_Informalidad","PEA","Des_Sub","Desocupación_Urbana",
+                        "Participación_Urbana")
+
+# Variables para aplicar Logaritmo y estandarizar
+variables_log<-c("Act_Prim","Prod_Priv_Par","May_Text_Calz","Prod_Edif","Rem_Manu",
+                 "Merc_Burs","Remesas","Venta_Autos","PIB","Ahorro")
+
+# Llenar por Columnas
+variables_macro_transformadas<-data.frame(TBM_Score,
+                            map_dfc(variables_Z,estandarizacion),
+                            map_dfc(variables_porcentaje,porcentaje),
+                            map_dfc(variables_log,logaritmo))
+                            # llenarlo por columnas
+```
+
+```{r}
+kable(head(variables_macro_transformadas[,1:6],10),align = "cccccc")
+```
+
+## ANÁLISIS DE CORRELACIÓN
+
+Es posible que entre las variables elegidas haya correlación, así que se obtiene la **Matriz de Correlación** y también se realiza una gráfica con **corrplot** para poder apreciar los resultados del grado de correlación con mayor facilidad.
+
+```{r}
+# Matriz
+matriz_correlacion<-cor(variables_macro_transformadas[,2:length(variables_macro_transformadas)])
+```
+
+El análisis de la matriz de correlación muestra cómo distintos factores económicos se relacionan entre sí. El PIB tiene una fuerte conexión con las remesas, las exportaciones y el consumo, lo que indica que el crecimiento económico depende de la entrada de divisas y la demanda interna. La correlación negativa entre el tipo de cambio y el PIB sugiere que la depreciación del peso no siempre impulsa la economía, posiblemente por el encarecimiento de insumos dolarizados y su efecto en la inflación.
+
+El desempleo, la subocupación y la informalidad están fuertemente ligados, reflejando que, en tiempos de crisis, más personas entran en el sector informal por falta de empleo formal. En el sector energético, los ingresos de PEMEX y las exportaciones petroleras muestran una fuerte relación, confirmando la dependencia de la economía en los hidrocarburos.
+
+Finalmente, la bolsa de valores (IPC) y las tasas de interés (TIIE) están correlacionadas, lo que indica que el mercado financiero responde a la política monetaria. En conjunto, estos datos sugieren que el crecimiento económico depende del comercio exterior y el consumo, pero enfrenta riesgos por la inflación, el tipo de cambio y la precarización laboral.
+
+
+```{r,fig.width=14,fig.height=9.3}
+# Gráfica
+corrplot(matriz_correlacion,type="upper",order="hclust",
+         title = "Correlación de Variables",
+         mar=c(0,0,1.5,0))
+```
+
+Hay que resaltar que existen casos donde la correlación de las variables es fuerte, ya sea de manera positiva (círculos azules) o negativa (círculos rojos), lo cual puede convertirse en un problema para llevar a cabo la regresión. Se van a eliminar algunas que pueden estar aportando información similar.
+
+- **Desocupación Urbana:** Ya se está considerando la Población Económicamente Activa (PEA) y la Población Desocupada (Pob_Desocupada)
+
+- **Ing_PEMEX:** Se tiene otra variable que ya cuenta con los datos sobre el ingreso por explotación y distribución de hidrocarburos (FMP_AT) 
+
+- **IGAE_2018 y INPP_Pet_Serv:** El PIB aporta información similar sobre la actividad económica.
+
+- **TIIE_28d:** Aparecen otras tasas como la de Interés Nominal (TIN) o la de Crédito a los hogares (TICH).
+
+- **CC_VigP:** Es más para créditos al sector privados como empresas grandes.
+
+- **GP_SP:** Hay otra variable que considera tanto ingresos como gastos del Sector Público (Ing_Gob).
+
+- **Exp_Total y Res_Inter:** Son indicadores que son más útiles para analizar situaciones externas.
+
+- **OP_SPEI:** Aunque refleja la actividad financiera por el número de operaciones, existen otras variables que se relacionan más con las razones del impago en las tarjetas de crédito.  
+
+```{r}
+variables_correlacionadas<-c("Desocupación_Urbana","Res_Inter","Ing_PEMEX","IGAE_2018",
+                              "TIIE_28d","CC_VigP","GP_SP","INPP_Pet_Serv","OP_SPEI","Exp_Total")
+posiciones<-c()
+for(k in variables_correlacionadas){
+  posiciones<-c(posiciones,match(k,colnames(variables_macro_transformadas)))
+}
+variables_modelo<-variables_macro_transformadas[-posiciones]
+ncol(variables_modelo) - 1
+```
+
+```{r,fig.width=14,fig.height=9.3}
+matriz_correlacion<-cor(variables_modelo[-1])
+# Gráfica
+corrplot(matriz_correlacion,type="upper",order="hclust",
+         title = "Correlación de Variables",
+         mar=c(0,0,1.5,0))
+```
+
+Con la eliminación de variables altamente correlacionadas, la matriz de correlación muestra una imagen más clara de las relaciones económicas sin redundancias. Se observa que la inflación y el tipo de cambio tienen una relación significativa, lo que indica que las variaciones en la moneda pueden impactar los precios de bienes y servicios. La deuda pública y el salario mínimo general (SMG) también están fuertemente relacionadas, sugiriendo que el financiamiento gubernamental podría influir en políticas salariales.
+
+El PIB sigue correlacionado con las remesas y el consumo, lo que confirma que la economía depende de la entrada de dinero del exterior y del gasto interno. Además, la inversión fija y la participación urbana muestran una fuerte relación con la producción industrial, lo que es consistente con el hecho de que la urbanización impulsa la infraestructura y la actividad manufacturera.
+
+Por otro lado, la tasa de informalidad y el desempleo parcial (subocupación) siguen estando correlacionados, lo que refleja que en condiciones económicas adversas, el mercado laboral se precariza. Finalmente, la relación entre el mercado bursátil y la producción manufacturera sugiere que la estabilidad industrial puede influir en el desempeño financiero.
+
+Este análisis ajustado muestra cómo la actividad económica depende de flujos externos, inversión y estabilidad financiera, al tiempo que enfrenta riesgos por inflación, precarización laboral y volatilidad en el tipo de cambio.
+
+
+\newpage
+
+## REGRESIÓN MÚLTIPLE
+
+Lo que sigue es realizar el modelo de regresión múltiple para obtener los coeficientes (betas) que se ocupan para calcular el Score y después regresar a la PD de incumplimiento con el objetivo de comparar las predicciones del modelo con los datos reales.
+$$\mathbf{SCORE = \beta_0 + \beta_1X_1 + ...+ \beta_kX_k}$$
+
+```{r}
+# Regresión Múltiple
+predictoras<-colnames(variables_modelo)[-1]  # El Score se elimina de los nombres
+respuesta<-colnames(variables_modelo)[1]  # Variable de Respuesta
+formula_str<-paste(respuesta,"~",paste(predictoras,collapse = "+"))
+TBM_reg_mult<-lm(as.formula(formula_str),data=variables_modelo)
+summary(TBM_reg_mult)
+AIC(TBM_reg_mult)
+```
+
+
+
+Se eliminarán las variables que no son significativas para el modelo y se agregarán las predicciones a la tabla, es decir, el valor del Score calculado con los coeficientes que arroja la función. Además, con ese nuevo Score se puede regresar nuevamente a la PD estimada con una regresión logística y compararla con los datos del banco.
+
+$$ \mathbf{PD = \dfrac{1}{1+e^{-SCORE}}}$$
+
+```{r}
+# VARIABLES SIGNIFICATIVAS
+resumen<-summary(TBM_reg_mult)
+significativas<-rownames(resumen$coefficients)[resumen$coefficients[,4]<0.05]
+significativas<-significativas[significativas!="(Intercept)"] # excluir intercepto B0
+significativas
+```
+
+
+```{r}
+# Regresión Múltiple
+respuesta<-colnames(variables_modelo)[1]  # Variable de Respuesta
+formula_str<-paste(respuesta,"~",paste(significativas,collapse = "+"))
+TBM_reg_mult<-lm(as.formula(formula_str),data=variables_modelo)
+summary(TBM_reg_mult)
+```
+
+```{r}
+# VARIABLES SIGNIFICATIVAS
+resumen<-summary(TBM_reg_mult)
+significativas<-rownames(resumen$coefficients)[resumen$coefficients[,4]<0.05]
+significativas<-significativas[significativas!="(Intercept)"] # excluir intercepto B0
+significativas
+```
+
+```{r}
+# Regresión Múltiple
+respuesta<-colnames(variables_modelo)[1]  # Variable de Respuesta
+formula_str<-paste(respuesta,"~",paste(significativas,collapse = "+"))
+TBM_reg_mult<-lm(as.formula(formula_str),data=variables_modelo)
+summary(TBM_reg_mult)
+```
+
+
+```{r}
+# VARIABLES SIGNIFICATIVAS
+resumen<-summary(TBM_reg_mult)
+significativas<-rownames(resumen$coefficients)[resumen$coefficients[,4]<0.05]
+significativas<-significativas[significativas!="(Intercept)"] # excluir intercepto B0
+significativas
+
+# BETAS
+coef(TBM_reg_mult)
+```
+
+```{r}
+# Cálculo del Score y de la PD estimada
+comparacion<-data.frame(PD_TBM=PD_bancos$TBM / 100,TBM_Score)
+
+comparacion<- comparacion %>% 
+              mutate(Score_Predicho = as.numeric(predict(TBM_reg_mult))) %>%
+              mutate(PD_Predicha=1/(1+exp(-1*Score_Predicho)))
+
+kable(head(comparacion,10),align = "cccc")
+```
+
+\newpage
+
+```{r}
+# Gráfica
+plot(comparacion$PD_TBM,type="l",lwd=2,ylim=c(0,0.20),
+     main="PD Regresión Múltiple",
+     xlab="Meses",ylab="Probabilidad de Incumplimiento")
+lines(comparacion$PD_Predicha,type="l",col="red",lwd=2)
+legend(40, 0.1, legend=c("PD TBM", "PD Regresión Múltiple"),
+       col=c("black", "red"),lwd=2,lty=1,cex=0.8)
+```
+
+Debido a que son demasiadas variables y también hay colinealidad, se va a utilizar métodos de penalización Ridge, Lasso y Elastic Net.
+
+\newpage
+
+## PENALIZACIÓN RIDGE
+
+La regresión de Ridge, también conocida como regularización L2, es uno de los varios tipos de regularización para modelos de regresión lineal. La regularización es un método estadístico para reducir los errores causados por el sobreajuste en los datos de entrenamiento. La regresión de Ridge corrige específicamente la multicolinealidad en el análisis de regresión.
+
+La regresión de Ridge modifica OLS calculando coeficientes que tienen en cuenta predictores potencialmente correlacionados. En concreto, la regresión de Ridge corrige los coeficientes de alto valor introduciendo un término de regularización (a menudo denominado término de penalización) en la función RSS (Suma residual de cuadrados). Este término de penalización es la suma de los cuadrados de los coeficientes del modelo, está dada por:
+$$ y = \sum_{k=1}^n(y_k-\hat{y_k})^2 + \mathbf{\lambda \sum_{k=1}^n {B_k}^2}$$
+Para hallar el valor adecuado de $\lambda$ se va a utilizar la librería **glmnet** y también la información de las variables con la Probabilidad de Incumplimiento. Realizando un primer modelo con el ajuste automático que hace R se genera un modelo que es muy impreciso, así que como argumento dentro de la función de **cv.glmnet** se declarará una secuencia de 100 valores para lambda en escala logarítmica que inicia en un valor calculado como $\lambda_{max}=max(\dfrac{X^Ty}{n})$ y también utilizando 10 **folds** para mejorar la eficiencia al hallar el lambda mínimo.
+
+```{r,fig.align='center',fig.width=5.4,fig.height=3.6}
+# Validación Cruzada
+x1<-as.matrix(variables_modelo[-1])
+y1<-as.matrix(PD_bancos$TBM)
+lambda_max<-max(abs(t(x1)%*%y1))/nrow(x1)
+cv.lambda<-cv.glmnet(x=x1,y=y1,alpha=0,lambda=exp(seq(log(lambda_max), log(lambda_max / 1000),
+                                       length.out = 100)),nfolds = 10)  # ridge
+plot(cv.lambda)
+title("Penalización Ridge", line = 2.5)
+lmin<-cv.lambda$lambda.min   # penalización
+lmin
+```
+
+Después se obtienen los coeficientes del modelo que ayudarán a calcular la PD
+
+```{r}
+# Coeficientes
+TBM_ridge<-glmnet(x=x1,y=y1,alpha=0,lambda = lmin)
+summary(TBM_ridge)
+coef(TBM_ridge)
+```
+\newpage
+
+Nuevamente se va a comparar las predicciones del modelo con los datos reales para ver los ajustes que se realizaron y ver si puede predecir de mejor manera. Además, obtener el valor del coeficiente de determinación ayudará a entender el porcentaje de variabilidad que es explicado por el modelo, así que se agregarán dos columnas más para los errores al cuadrado y el total de los cuadrados que son necesarios para calcularlo.
+
+```{r}
+# Predicciones del Score y la PD con la Penalización Ridge
+comparacion<-data.frame(PD_TBM=PD_bancos$TBM / 100,TBM_Score)
+
+comparacion<- comparacion %>% 
+              mutate(PD_Ridge=as.numeric(predict(TBM_ridge,newx=x1)) / 100) %>% 
+              mutate(Score_Ridge = log(PD_Ridge/(1-PD_Ridge))) %>%
+              mutate(Cuadrado_Errores=(PD_TBM -PD_Ridge)^2,Cuadrado_Total=(PD_TBM-mean(PD_TBM))^2)
+kable(head(comparacion),align = "cccccc")
+```
+
+```{r,fig.width=6.5,fig.height=3.6,fig.align='center'}
+# Gráfica de la Penalización Ridge
+plot(comparacion$PD_TBM,type="l",lwd=2,ylim=c(0,0.20),
+     main="Total Banca Múltiple: PD con Penalización Ridge",
+     xlab="Meses",ylab="Probabilidad de Incumplimiento")
+lines(comparacion$PD_Ridge,type="l",col="blue",lwd=2)
+legend(40, 0.1, legend=c("PD TBM", "PD Ridge"),
+       col=c("black", "blue"),lwd=2,lty=1,cex=0.8)
+```
+Por último se procede a calcular el R^2 ajustado que servirá para comparar los modelos dependiendo la penalización utilizada mediante una función que recibe como argumento el dataframe donde están las columnas necesarias de los errores al cuadrado (RSS) y el total de los cuadrados (STT), además de considerar el número de observaciones (n) y el número de variables predictoras (k).
+
+$$\mathbf{r^2 = 1 - \dfrac{\dfrac{RSS}{n-k-1}}{\dfrac{STT}{n-1}}}$$
+Adicionalmente se calcularán otras métricas que servirán para elegir el modelo de penalización más preciso de los 3 que se establecieron, estas son:
+
+- **Mean Absolute Error (MAE):** Error medio absoluto entre el valor real y el predicho
+- **Mean Squared Error (MSE):** Promedio de los errores al cuadrado, es más sensible a errores grandes
+- **Root Mean Squared Error (RMSE):** Error típico o estándar del modelo
+- **Mean Absolute Percentage Error (MAPE):** Muestra el error medio porcentual que tiene el modelo
+
+```{r}
+# Función que calcula el R^2 ajustado
+adj_r_cuadrado<-function(df){
+  numerador<-sum(df$Cuadrado_Errores)/(120 - length(variables_modelo[-1])-1)
+  denominador<-sum(df$Cuadrado_Total) / (120-1)
+  return(1-(numerador / denominador))}
+cat("El coeficiente de determinación R^2 ajustado es: ",adj_r_cuadrado(comparacion))
+```
+
+```{r}
+# Cálculo del error para la penalización Ridge
+MAE_Ridge <- mean(abs(comparacion$PD_TBM - comparacion$PD_Ridge))
+MSE_Ridge <- mean((comparacion$PD_TBM - comparacion$PD_Ridge)^2)
+RMSE_Ridge <- sqrt(MSE_Ridge)
+MAPE_Ridge <- mean(abs((comparacion$PD_TBM - comparacion$PD_Ridge) / comparacion$PD_TBM)) * 100
+
+# Mostrar resultados
+cat("MAE Ridge:", MAE_Ridge, "\n")
+cat("MSE Ridge:", MSE_Ridge, "\n")
+cat("RMSE Ridge:", RMSE_Ridge, "\n")
+cat("MAPE Ridge:", MAPE_Ridge, "%\n")
+```
+\newpage
+
+## PENALIZACIÓN LASSO
+
+Se trata de un enfoque que penaliza el vector de coeficientes de regresión, lo que ayuda a seleccionar características y mejorar la precisión del modelo, se le conoce como L1 y tiene el efecto de forzar a que los coeficientes de los predictores tiendan a cero. Dado que un predictor con coeficiente de regresión cero no influye en el modelo, lasso consigue excluir los predictores menos relevantes. Ahora el modelo sufre una "penalización" que está dada por:
+$$ y = \sum_{k=1}^n(y_k-\hat{y_k})^2 + \mathbf{\lambda \sum_{k=1}^n |B_k|}$$
+Para hallar el valor adecuado de $\lambda$ se va a utilizar la librería **glmnet** y también la información de las variables con la Probabilidad de Incumplimiento.
+```{r}
+# Validación Cruzada
+x1<-as.matrix(variables_modelo[-1])
+y1<-as.matrix(PD_bancos$TBM)
+lambda_max<-max(abs(t(x1)%*%y1))/nrow(x1)
+cv.lambda<-cv.glmnet(x=x1,y=y1,alpha=1,lambda=exp(seq(log(lambda_max), log(lambda_max / 1000),
+                                       length.out = 100)),nfolds = 10) # lasso
+plot(cv.lambda)
+title("Penalización Lasso", line = 2.5)
+lmin<-cv.lambda$lambda.min   # penalización
+lmin
+```
+Después se obtienen los coeficientes del modelo que ayudarán a calcular la PD
+```{r}
+# Coeficientes
+TBM_lasso<-glmnet(x=x1,y=y1,alpha=1,lambda = lmin)
+summary(TBM_lasso)
+coef(TBM_lasso)
+```
+\newpage
+
+Nuevamente se va a comparar las predicciones del modelo con los datos reales para ver los ajustes que se realizaron y ver si puede predecir de mejor manera. Además, obtener el valor del coeficiente de determinación ayudará a entender el porcentaje de variabilidad que es explicado por el modelo, así que se agregarán dos columnas más para los errores al cuadrado y el total de los cuadrados que son necesarios para calcularlo.
+```{r}
+# Predicciones del Score y la PD con la Penalización Lasso
+comparacion<-data.frame(PD_TBM=PD_bancos$TBM / 100,TBM_Score)
+
+comparacion<- comparacion %>% 
+              mutate(PD_Lasso=as.numeric(predict(TBM_lasso,newx=x1)) / 100) %>% 
+              mutate(Score_Lasso = log(PD_Lasso/(1-PD_Lasso))) %>% 
+              mutate(Cuadrado_Errores=(PD_TBM -PD_Lasso)^2,Cuadrado_Total=(PD_TBM-mean(PD_TBM))^2)
+kable(head(comparacion),align = "cccccc")
+```
+
+```{r,fig.width=6.5,fig.height=3.6,fig.align='center'}
+# Gráfica de la Penalización Lasso
+plot(comparacion$PD_TBM,type="l",lwd=2,ylim=c(0,0.20),
+     main="Total Banca Múltiple: PD con Penalización Lasso",
+     xlab="Meses",ylab="Probabilidad de Incumplimiento")
+lines(comparacion$PD_Lasso,type="l",lwd=2,col="green4")
+legend(40, 0.1, legend=c("PD TBM", "PD Lasso"),
+      col=c("black", "green4"),lwd = 2,lty=1,cex=0.8)
+```
+
+```{r}
+cat("El coeficiente de determinación R^2 ajustado es: ",adj_r_cuadrado(comparacion))
+
+# Cálculo del error para la penalización Lasso
+MAE_Lasso <- mean(abs(comparacion$PD_TBM - comparacion$PD_Lasso))
+MSE_Lasso <- mean((comparacion$PD_TBM - comparacion$PD_Lasso)^2)
+RMSE_Lasso <- sqrt(MSE_Lasso)
+MAPE_Lasso <- mean(abs((comparacion$PD_TBM - comparacion$PD_Lasso) / comparacion$PD_TBM)) * 100
+
+# Mostrar resultados
+cat("MAE Lasso:", MAE_Lasso, "\n")
+cat("MSE Lasso:", MSE_Lasso, "\n")
+cat("RMSE Lasso:", RMSE_Lasso, "\n")
+cat("MAPE Lasso:", MAPE_Lasso, "%\n")
+```
+
+\newpage
+
+
+## PENALIZACIÓN ELASTIC NET
+
+Elastic net incluye una regularización que combina la penalización L1 y L2,  El grado en que influye cada una de las penalizaciones está controlado por el hiperparámetro  alpha. Su valor está comprendido en el intervalo [0,1]. Cuando  $\alpha=0$, se aplica Ridge y cuando $\alpha=1$ se aplica Lasso. La combinación de ambas penalizaciones suele dar lugar a buenos resultados. Una estrategia frecuentemente utilizada es asignarle casi todo el peso a la penalización L1 ( $\alpha$ muy próximo a 1) para conseguir seleccionar predictores y un poco a la L2 para dar cierta estabilidad en el caso de que algunos predictores estén correlacionados. En este caso el modelo sufre una "penalización" que es una combinación de las dos anteriores, de modo que:
+
+$$ y = \sum_{k=1}^n(y_k-\hat{y_k})^2 + \mathbf{\alpha \sum_{k=1}^n |B_k| + (1-\alpha) \sum_{k=1}^n {B_k}^2}$$
+Se eligió como valor $\alpha = 0.5$, para hallar el valor adecuado de $\lambda$ se va a utilizar la librería **glmnet** y también la información de las variables con la Probabilidad de Incumplimiento.
+```{r}
+# Validación Cruzada
+x1<-as.matrix(variables_modelo[-1])
+y1<-as.matrix(PD_bancos$TBM)
+lambda_max<-max(abs(t(x1)%*%y1))/nrow(x1)
+cv.lambda<-cv.glmnet(x=x1,y=y1,alpha=0.5,lambda=exp(seq(log(lambda_max), log(lambda_max / 1000),
+                                        length.out = 100)),nfolds = 10) # elastic net
+plot(cv.lambda)
+title("Penalización Elastic Net", line = 2.5)
+lmin<-cv.lambda$lambda.min   # penalización
+lmin
+```
+
+Después se obtienen los coeficientes del modelo que ayudarán a calcular la PD
+```{r}
+# Coeficientes
+TBM_elastic_net<-glmnet(x=x1,y=y1,alpha=0.5,lambda = lmin)
+summary(TBM_elastic_net)
+coef(TBM_elastic_net)
+```
+\newpage
+
+Nuevamente se va a comparar las predicciones del modelo con los datos reales para ver los ajustes que se realizaron y ver si puede predecir de mejor manera. Además, obtener el valor del coeficiente de determinación ayudará a entender el porcentaje de variabilidad que es explicado por el modelo, así que se agregarán dos columnas más para los errores al cuadrado y el total de los cuadrados que son necesarios para calcularlo.
+```{r}
+# Predicciones del Score y la PD con la Penalización Elastic Net
+comparacion<-data.frame(PD_TBM=PD_bancos$TBM / 100,TBM_Score)
+
+comparacion<- comparacion %>% 
+              mutate(PD_Elastic_Net=as.numeric(predict(TBM_elastic_net,newx=x1)) / 100) %>% 
+              mutate(Score_Elastic_Net = log(PD_Elastic_Net/(1-PD_Elastic_Net))) %>% 
+              mutate(Cuadrado_Errores=(PD_TBM-PD_Elastic_Net)^2,Cuadrado_Total=(PD_TBM-mean(PD_TBM))^2)
+kable(head(comparacion),align = "cccccc")
+```
+
+```{r,fig.width=6.5,fig.height=3.6,fig.align='center'}
+# Gráfica de la Penalización Elastic Net
+plot(comparacion$PD_TBM,type="l",lwd=2,ylim=c(0,0.20),
+     main="Total Banca Múltiple: PD con Penalización Elastic Net",
+     xlab="Meses",ylab="Probabilidad de Incumplimiento")
+lines(comparacion$PD_Elastic_Net,type="l",col="orange2",lwd=2)
+legend(40, 0.1, legend=c("PD TBM", "PD Elastic Net"),
+       col=c("black", "orange2"),lwd=2,lty=1,cex=0.8)
+```
+
+```{r}
+cat("El coeficiente de determinación R^2 ajustado es: ",adj_r_cuadrado(comparacion))
+
+# Cálculo del error para la penalización Elastic Net
+MAE_Elastic_Net <- mean(abs(comparacion$PD_TBM - comparacion$PD_Elastic_Net))
+MSE_Elastic_Net <- mean((comparacion$PD_TBM - comparacion$PD_Elastic_Net)^2)
+RMSE_Elastic_Net <- sqrt(MSE_Elastic_Net)
+MAPE_Elastic_Net <- mean(abs((comparacion$PD_TBM - comparacion$PD_Elastic_Net) / comparacion$PD_TBM)) * 100
+
+# Mostrar resultados
+cat("MAE Elastic Net:", MAE_Elastic_Net, "\n")
+cat("MSE Elastic Net:", MSE_Elastic_Net, "\n")
+cat("RMSE Elastic Net:", RMSE_Elastic_Net, "\n")
+cat("MAPE Elastic Net:", MAPE_Elastic_Net, "%\n")
+```
+
+\newpage
+
+## RESULTADOS
+
+Lo que se va a hacer es un Análisis de Varianza **ANOVA** para el modelo de regresión múltiple, así como la verificación de los 4 supuestos para los errores a través del valor p y de los estadísticos de las pruebas adecuadas para cada uno.
+
+- **Media Cero:** Calcular la media
+- **Normalidad:** Prueba de Anderson Darling
+- **Independencia:** Prueba de Durbin Watson 
+- **Varianza Constante:** Prueba de Breusch Pagan 
+
+Al final se van a comparar los modelos que presentan penalización y también se dará una interpretación de lo que representan las variables ante el planteamiento de que las personas dejen de pagar sus tarjetas de crédito.
+
+```{r}
+# ANOVA
+anova(TBM_reg_mult)
+AIC(TBM_reg_mult)
+```
+
+```{r,warning=FALSE,message=FALSE}
+# VERIFICACIÓN DE SUPUESTOS
+supuestos<-function(modelo){
+  # R^2 Ajustado
+  r_2<-summary(modelo)$adj.r.squared
+  # Media Cero
+  media<-mean(residuals(modelo))
+  # Homogeneidad de Varianza
+  breuch_pagan<-bptest(modelo)$p.value[[1]]
+  # Normalidad
+  anderson_darling<-ad.test(residuals(modelo))$p.value
+  # Independencia
+  durbin_watson<-dwtest(modelo)$statistic[[1]]
+  
+  return(c(cat("El r cuadrado ajustado es: ",r_2,"\n"),
+           cat("La media de los errores es:", media,"\n"),
+           cat("El valor p para la prueba de Homoscedasticidad de Varianza es ",
+               breuch_pagan,"\n"),
+           cat("El valor p para la prueba de Normalidad de los errores es ",
+               anderson_darling,"\n"),
+           cat("El estadístico para la prueba de Autocorrelación de los errores es ",
+               durbin_watson )))
+}
+supuestos(TBM_reg_mult)
+```
+\newpage
+
+## INTERPRETACIÓN
+
+El modelo de regresión múltiple explica alrededor de un 86% de la variabilidad de la variable dependiente (score) reflejado en el valor del **r cuadrado ajustado**, debido a que si es un porcentaje alto significa que ajusta bien al comportamiento que se quiere predecir.
+
+Lo siguiente que se verificó fueron los supuestos de un modelo de regresión, vemos que cumple que la media de los errores sea cero, también que la varianza es constante y que los errores presentan un comportamiento normal (debido a que en ambos casos se tiene un valor-p mayor al nivel de significancia provocando que no se rechacen las hipótesis nulas). Lo único que hay que recalcar es que hay problemas con el **Supuesto de la Autocorrelación**, pues el valor del estadístico en la prueba Durbin Watsson es 0.779, el cual nos indica que hay autocorrelación positiva entre los residuales en lugar de que sean completamente independientes, lo cual es un punto a tener en consideración.
+
+Por otro lado, se realizaron los modelos que tienen penalización, así que al compararlos mediante el cálculo del R cuadrado ajustado se obtuvo que el mejor modelo es el de la **Penalización Ridge (0.8904)** y también sus métricas obtenidas tienen resultados más eficientes en cuanto al error comparadas con las otras dos penalizaciones. De igual manera, en la gráfica correspondiente se ve que para este modelo las líneas de la Probilidad de Incumplimiento y las Predicciones siguen la misma trayectoria y la distancia de separación es menor que en los demás modelos.
+
+Finalmente, se presentan las variables que resultaron ser significativas dentro del modelo de regresión múltiple y el sentido económico para el contexto del problema, es decir, la relación que tienen con la Probabilidad de Incumplimiento de las Tarjetas de Crédito tomando en cuenta los datos del **Total de la Banca Múltiple**:
+
+- **TC**: El Tipo de Cambio puede ser relevante debido a que si sufre movimientos importantes impacta en la depreciación del peso y también en el precio de los bienes, al mismo tiempo que el poder adquisitivo disminuye y que si hay una deuda en dólares se aumenta la carga financiera, es por esta razón que es una de las variables a monitorear al analizar el incumplimiento del pago en las tarjetas.
+
+- **SMG**: Considerar el Salario Mínimo General como variable de predicción es importante ya que está relacionado directamente con el ingreso que una persona recibe, si hay una reducción puede limitar su capacidad de pago y llevar a una probabilidad de incumplimiento más grande.
+
+- **ICC**: Este valor del Indicador de Confianza del Consumidor refleja si las personas priorizan su ahorro o de cierta forma prefieren usar el crédito y haciendo los pagos correspondientes, por lo que se puede decir que a mayor confianza del consumidor, es menos probable que lleguen a un impago.
+
+- **Deuda_Pub**: Si hay déficit fiscal o deuda se afecta a toda la economía en general y como medida de respuesta el gobierno puede recortar los gastos e incrementar los impuestos afectando los ingresos disponibles de todos.
+
+- **Ing_Gob**: Abarca el ingreso-gasto que tiene el gobierno, así que si cuenta con recursos los puede distribuir mediante subsidios o apoyos sociales incrementando el ingreso que tienen las personas, por lo que un impago en las tarejtas sería menos probable.
+
+- **TIN**: Se trata de la tasa de interés para los instrumentos de deuda en el corto plazo, entonces si llega a subir recae en un costo mayor de financiamiento para los bancos ocasionando que a su vez aumenten la tasa del crédito. Además, este rubro puede considerarse como una tasa de referencia de la que dependen o están basadas las tarjetas de crédito. Por lo tanto, la relación sería que si se incrementan los valores de este indicador, puede generar mayor cantidad de impagos.
+
+- **Participación_Urbana**: Hace referencia al porcentaje de la población en edad de trabajar que participa en el mercado laboral en áreas urbanas, de este modo, un mayor porcentaje participación indica que las personas tienen más disponibilidad de los ingresos porque tienen trabajo o lo están buscando activamente, es decir, hay dinamismo económico, lo que reduce el incumplimiento de los pagos.
+
+- **Prod_Edif**: Esta variable tiene que ver con el valor económico generado por el sector de la construcción en actividades de edificación y la manera en que puede estar relacionada con el impago en las tarjetas de crédito es que si disminuye considerablemente indicaría que se atraviesa un periodo de inestabilidad económica donde hay desempleo provocando que los pagos no se lleven a cabo.
+
+\newpage
+
+# BANORTE
+
+Ahora se va a repetir el mismo procedimiento pero ahora con los datos de la Probabilidad de Incumplimiento de **Banorte**
+
+```{r}
+# Score para Banorte
+Banorte_Score<- PD_bancos %>% 
+  select(Banorte) %>% 
+  mutate(Banorte = log((Banorte/100) / (1-(Banorte / 100))))
+colnames(Banorte_Score)<-"Score_Banorte"
+
+kable(head(Banorte_Score,10),align = "c")
+
+# Cambiar datos por los de Banorte
+variables_modelo<-data.frame(Banorte_Score,variables_modelo[-1])
+```
+
+## REGRESIÓN MÚLTIPLE
+
+```{r}
+# Regresión Múltiple
+predictoras<-colnames(variables_modelo)[-1]  # El Score se elimina de los nombres
+respuesta<-colnames(variables_modelo)[1]  # Variable de Respuesta
+formula_str<-paste(respuesta,"~",paste(predictoras,collapse = "+"))
+Banorte_reg_mult<-lm(as.formula(formula_str),data=variables_modelo)
+modelo_completo<-Banorte_reg_mult
+summary(Banorte_reg_mult)
+AIC(Banorte_reg_mult)
+```
+
+Se va a reducir el número de variables predictoras dejando solo las que son significativas
+
+```{r}
+# VARIABLES SIGNIFICATIVAS
+resumen<-summary(Banorte_reg_mult)
+significativas<-rownames(resumen$coefficients)[resumen$coefficients[,4]<0.05]
+significativas<-significativas[significativas!="(Intercept)"] # excluir intercepto B0
+significativas
+```
+
+```{r}
+# Regresión Múltiple
+respuesta<-colnames(variables_modelo)[1]  # Variable de Respuesta
+formula_str<-paste(respuesta,"~",paste(significativas,collapse = "+"))
+Banorte_reg_mult<-lm(as.formula(formula_str),data=variables_modelo)
+summary(Banorte_reg_mult)
+```
+
+```{r}
+# VARIABLES SIGNIFICATIVAS
+resumen<-summary(Banorte_reg_mult)
+significativas<-rownames(resumen$coefficients)[resumen$coefficients[,4]<0.05]
+significativas<-significativas[significativas!="(Intercept)"] # excluir intercepto B0
+significativas
+```
+
+```{r}
+# Regresión Múltiple
+respuesta<-colnames(variables_modelo)[1]  # Variable de Respuesta
+formula_str<-paste(respuesta,"~",paste(significativas,collapse = "+"))
+Banorte_reg_mult<-lm(as.formula(formula_str),data=variables_modelo)
+summary(Banorte_reg_mult)
+```
+
+```{r}
+# VARIABLES SIGNIFICATIVAS
+resumen<-summary(Banorte_reg_mult)
+significativas<-rownames(resumen$coefficients)[resumen$coefficients[,4]<0.05]
+significativas<-significativas[significativas!="(Intercept)"] # excluir intercepto B0
+significativas
+
+# BETAS
+coef(Banorte_reg_mult)
+```
+
+Ahora que todas las variables son significativas se procederá a calcular el Score y también se hará la transformación para regresar a la Probabilidad de Incumplimiento.
+
+```{r}
+# Cálculo del Score y de la PD estimada
+comparacion<-data.frame(PD_Banorte=PD_bancos$Banorte / 100,Banorte_Score)
+
+comparacion<- comparacion %>% 
+  mutate(Score_Predicho = as.numeric(predict(Banorte_reg_mult))) %>%
+  mutate(PD_Predicha=1/(1+exp(-1*Score_Predicho)))
+
+kable(head(comparacion,10),align = "cccc")
+```
+\newpage
+Después se realizará una gráfica para comparar los datos reales de Banorte con las predicciones del modelo de regresión.
+
+```{r}
+# Gráfica
+plot(comparacion$PD_Banorte,type="l",lwd=2,ylim=c(0,0.22),
+     main="PD Regresión Múltiple",
+     xlab="Meses",ylab="Probabilidad de Incumplimiento")
+lines(comparacion$PD_Predicha,type="l",col="red",lwd=2)
+legend(40, 0.1, legend=c("PD Banorte", "PD Regresión Múltiple"),
+       col=c("black", "red"),lwd=2,lty=1,cex=0.8)
+
+```
+\newpage
+
+## PENALIZACIÓN RIDGE
+
+```{r}
+# Validación Cruzada
+x1<-as.matrix(variables_modelo[-1])
+y1<-as.matrix(PD_bancos$Banorte)
+lambda_max<-max(abs(t(x1)%*%y1))/nrow(x1)
+cv.lambda<-cv.glmnet(x=x1,y=y1,alpha=0,lambda=exp(seq(log(lambda_max), log(lambda_max / 1000),
+                     length.out = 100)),nfolds = 10)  # ridge
+plot(cv.lambda)
+title("Penalización Ridge", line = 2.5)
+lmin<-cv.lambda$lambda.min   # penalización
+lmin
+```
+
+```{r}
+# Coeficientes
+Banorte_ridge<-glmnet(x=x1,y=y1,alpha=0,lambda = lmin)
+summary(Banorte_ridge)
+coef(Banorte_ridge)
+```
+
+```{r}
+# Predicciones del Score y la PD con la Penalización Ridge
+comparacion<-data.frame(PD_Banorte=PD_bancos$Banorte / 100,Banorte_Score)
+
+comparacion<- comparacion %>% 
+  mutate(PD_Ridge=as.numeric(predict(Banorte_ridge,newx=x1)) / 100) %>% 
+  mutate(Score_Ridge = log(PD_Ridge/(1-PD_Ridge))) %>%
+  mutate(Cuadrado_Errores=(PD_Banorte -PD_Ridge)^2,
+         Cuadrado_Total=(PD_Banorte-mean(PD_Banorte))^2)
+kable(head(comparacion),align = "cccccc")
+```
+
+```{r,fig.width=6.5,fig.height=3.6,fig.align='center'}
+# Gráfica de la Penalización Ridge
+plot(comparacion$PD_Banorte,type="l",lwd=2,ylim=c(0,0.20),
+     main="Banorte: PD con Penalización Ridge",
+     xlab="Meses",ylab="Probabilidad de Incumplimiento")
+lines(comparacion$PD_Ridge,type="l",col="blue",lwd=2)
+legend(40, 0.1, legend=c("PD Banorte", "PD Ridge"),
+       col=c("black", "blue"),lwd=2,lty=1,cex=0.8)
+```
+
+```{r}
+cat("El coeficiente de determinación R^2 ajustado es: ",adj_r_cuadrado(comparacion))
+
+# Cálculo del error para la penalización Ridge
+MAE_Ridge <- mean(abs(comparacion$PD_Banorte - comparacion$PD_Banorte))
+MSE_Ridge <- mean((comparacion$PD_Banorte - comparacion$PD_Ridge)^2)
+RMSE_Ridge <- sqrt(MSE_Ridge)
+MAPE_Ridge <- mean(abs((comparacion$PD_Banorte - comparacion$PD_Ridge) / comparacion$PD_Banorte)) * 100
+
+# Mostrar resultados
+cat("MAE Ridge:", MAE_Ridge, "\n")
+cat("MSE Ridge:", MSE_Ridge, "\n")
+cat("RMSE Ridge:", RMSE_Ridge, "\n")
+cat("MAPE Ridge:", MAPE_Ridge, "%\n")
+```
+\newpage
+
+## PENALIZACIÓN LASSO
+
+```{r}
+# Validación Cruzada
+x1<-as.matrix(variables_modelo[-1])
+y1<-as.matrix(PD_bancos$Banorte)
+lambda_max<-max(abs(t(x1)%*%y1))/nrow(x1)
+cv.lambda<-cv.glmnet(x=x1,y=y1,alpha=1,lambda=exp(seq(log(lambda_max), log(lambda_max / 1000),
+                                       length.out = 100)),nfolds = 10) # lasso
+plot(cv.lambda)
+title("Penalización Lasso", line = 2.5)
+lmin<-cv.lambda$lambda.min   # penalización
+lmin
+```
+
+
+```{r}
+# Coeficientes
+Banorte_lasso<-glmnet(x=x1,y=y1,alpha=1,lambda = lmin)
+summary(Banorte_lasso)
+coef(Banorte_lasso)
+```
+
+```{r}
+# Predicciones del Score y la PD con la Penalización Lasso
+comparacion<-data.frame(PD_Banorte=PD_bancos$Banorte / 100,Banorte_Score)
+
+comparacion<- comparacion %>% 
+  mutate(PD_Lasso=as.numeric(predict(Banorte_lasso,newx=x1))/100) %>% 
+  mutate(Score_Lasso = log(PD_Lasso/(1-PD_Lasso))) %>% 
+  mutate(Cuadrado_Errores=(PD_Banorte -PD_Lasso)^2,
+         Cuadrado_Total=(PD_Banorte-mean(PD_Banorte))^2)
+kable(head(comparacion),align = "cccccc")
+```
+
+```{r,fig.width=6.5,fig.height=3.6,fig.align='center'}
+# Gráfica de la Penalización Lasso
+plot(comparacion$PD_Banorte,type="l",lwd=2,ylim=c(0,0.20),
+     main="Banorte: PD con Penalización Lasso",
+     xlab="Meses",ylab="Probabilidad de Incumplimiento")
+lines(comparacion$PD_Lasso,type="l",lwd=2,col="green4")
+legend(40, 0.1, legend=c("PD Banorte", "PD Lasso"),
+       col=c("black", "green4"),lwd = 2,lty=1,cex=0.8)
+```
+
+```{r}
+cat("El coeficiente de determinación R^2 ajustado es: ",adj_r_cuadrado(comparacion))
+
+# Cálculo del error para la penalización Lasso
+MAE_Lasso <- mean(abs(comparacion$PD_Banorte-comparacion$PD_Lasso))
+MSE_Lasso <- mean((comparacion$PD_Banorte-comparacion$PD_Lasso)^2)
+RMSE_Lasso <- sqrt(MSE_Lasso)
+MAPE_Lasso <- mean(abs((comparacion$PD_Banorte-comparacion$PD_Lasso)/comparacion$PD_Banorte))*100
+
+# Mostrar resultados
+cat("MAE Lasso:", MAE_Lasso, "\n")
+cat("MSE Lasso:", MSE_Lasso, "\n")
+cat("RMSE Lasso:", RMSE_Lasso, "\n")
+cat("MAPE Lasso:", MAPE_Lasso, "%\n")
+```
+\newpage
+
+## PENALIZACIÓN ELASTIC NET
+
+Para ver lo que sucede cuando se modifica el parámetro de alpha dentro de la función **cv.lambda** se cambió el valor utilizado en la sección anterior y se estableció en $\alpha = 0.2$ indicando que la penalización Ridge tendrá mayor peso.
+
+```{r}
+# Validación Cruzada
+x1<-as.matrix(variables_modelo[-1])
+y1<-as.matrix(PD_bancos$Banorte)
+lambda_max<-max(abs(t(x1)%*%y1))/nrow(x1)
+cv.lambda<-cv.glmnet(x=x1,y=y1,alpha=0.2,lambda=exp(seq(log(lambda_max), log(lambda_max / 1000),
+                                        length.out = 100)),nfolds = 10) # elastic net
+plot(cv.lambda)
+title("Penalización Elastic Net", line = 2.5)
+lmin<-cv.lambda$lambda.min   # penalización
+lmin
+```
+
+```{r}
+# Coeficientes
+Banorte_elastic_net<-glmnet(x=x1,y=y1,alpha=0.2,lambda = lmin)
+summary(Banorte_elastic_net)
+coef(Banorte_elastic_net)
+```
+
+```{r}
+# Predicciones del Score y la PD con la Penalización Elastic Net
+comparacion<-data.frame(PD_Banorte=PD_bancos$Banorte / 100,Banorte_Score)
+
+comparacion<- comparacion %>% 
+  mutate(PD_Elastic_Net=as.numeric(predict(Banorte_elastic_net,newx=x1))/100)%>% 
+  mutate(Score_Elastic_Net = log(PD_Elastic_Net/(1-PD_Elastic_Net))) %>% 
+  mutate(Cuadrado_Errores=(PD_Banorte-PD_Elastic_Net)^2,
+         Cuadrado_Total=(PD_Banorte-mean(PD_Banorte))^2)
+kable(head(comparacion),align = "cccccc")
+```
+
+```{r,fig.width=6.5,fig.height=3.6,fig.align='center'}
+# Gráfica de la Penalización Elastic Net
+plot(comparacion$PD_Banorte,type="l",lwd=2,ylim=c(0,0.22),
+     main="Banorte: PD con Penalización Elastic Net",
+     xlab="Meses",ylab="Probabilidad de Incumplimiento")
+lines(comparacion$PD_Elastic_Net,type="l",col="orange2",lwd=2)
+legend(40, 0.1, legend=c("PD Banorte", "PD Elastic Net"),
+       col=c("black", "orange2"),lwd=2,lty=1,cex=0.8)
+```
+
+```{r}
+cat("El coeficiente de determinación R^2 ajustado es: ",adj_r_cuadrado(comparacion))
+
+# Cálculo del error para la penalización Elastic Net
+MAE_Elastic_Net <- mean(abs(comparacion$PD_Banorte-comparacion$PD_Elastic_Net))
+MSE_Elastic_Net <- mean((comparacion$PD_Banorte-comparacion$PD_Elastic_Net)^2)
+RMSE_Elastic_Net <- sqrt(MSE_Elastic_Net)
+MAPE_Elastic_Net <- mean(abs((comparacion$PD_Banorte-comparacion$PD_Elastic_Net)/comparacion$PD_Banorte))*100
+
+# Mostrar resultados
+cat("MAE Elastic Net:", MAE_Elastic_Net, "\n")
+cat("MSE Elastic Net:", MSE_Elastic_Net, "\n")
+cat("RMSE Elastic Net:", RMSE_Elastic_Net, "\n")
+cat("MAPE Elastic Net:", MAPE_Elastic_Net, "%\n")
+```
+\newpage
+
+## RESULTADOS
+
+```{r}
+# ANOVA
+anova(Banorte_reg_mult)
+AIC(Banorte_reg_mult)
+```
+
+```{r}
+# VERIFICACIÓN DE SUPUESTOS
+supuestos<-function(modelo){
+  # R^2 Ajustado
+  r_2<-summary(modelo)$adj.r.squared
+  # Media Cero
+  media<-mean(residuals(modelo))
+  # Homogeneidad de Varianza
+  breuch_pagan<-bptest(modelo)$p.value[[1]]
+  # Normalidad
+  anderson_darling<-ad.test(residuals(modelo))$p.value
+  # Independencia
+  durbin_watson<-dwtest(modelo)$statistic[[1]]
+  
+  return(c(cat("El r cuadrado ajustado es: ",r_2,"\n"),
+           cat("La media de los errores es:", media,"\n"),
+           cat("El valor p para la prueba de Homoscedasticidad de Varianza es ",
+               breuch_pagan,"\n"),
+           cat("El valor p para la prueba de Normalidad de los errores es ",
+               anderson_darling,"\n"),
+           cat("El estadístico para la prueba de Autocorrelación de los errores es ",
+               durbin_watson )))
+}
+supuestos(Banorte_reg_mult)
+```
+\newpage
+
+## INTERPRETACIÓN
+
+Es importante recalcar que eliminando las variables con colinealidad y las no significativas, el modelo logra predecir correctamente la variabilidad del score en un 92.53% aproximadamente (valor del **r cuadrado ajustado**), al igual que el Criterio de Akaike **AIC** disminuye si se compara con el del modelo inicial que involucra más variables.
+
+Se cumplen casi todos los supuestos de la regresión lineal para el modelo que tiene únicamente las variables significativas, solo la prueba falla en la **Autocorrelación de los Residuales** debido a que el estadístico de la prueba de Durbin Watson es cercano a 1 indicando la presencia de autocorrelación positiva como en el caso anterior. Para los otros supuestos si se cumple que la media de los residuales es cero, y también presentan varianza constante con un comportamiento significativamente normal pues el valor p muestra que no se pueden rechazar estas hipótesis nulas.
+
+Sobre los modelos con penalización, los que mejor ajustan son el de **Elastic Net** y el de **Ridge** ya que tienen un r cuadrado ajustado alto (cerca del 0.92), el cambio en el parámetro $\alpha=0.2$ permitió que el modelo superará ligeramente la precisión que tenía solamente con la penalización ridge puesto que el porcentaje de error es menor por algunos deciamles , pero aún los dos funcionan adecuadamente. Además de que en las dos gráficas es posible observar que esos modelos son los que más se acercan a la línea de los datos de Banorte.
+
+Por último, esta regresión comparte algunas variables significativas con las que se obtuvieron en Banca Múltiple, así que las que se repiten se pueden interpretar de manera similar y a continuación se presentan sólo las que aún no se han explicado en el contexto del planteamiento del problema, las cuales son:
+
+- **Bal_com:** Abarca las exportaciones de petróleo, las cuales están ligadas a los ingresos del gobierno, el empleo en este sector y al crecimiento económico, si disminuyen se dejan de fortalecer estos 3 factores y llega a impactar la economía en general, por lo que existiría un incremento en el incumplimiento de los pagos.
+
+- **RMRPO:** Si el salario real cae por la inflación se cuenta con un poder adquisitivo real menor, por lo que cubrir gastos básicos será la prioridad dejando de lado los pagos de la tarjeta de crédito cuando haya periodos complicados. 
+
+- **Rem_Manu:** Refleja la evolución del salario en la industria manufacturera, el cual es un sector importante en México. Si disminuye el salario real ocasionará que el endeudamiento que tengan las personas sea insostenible aumentando así los impagos.
+
+- **Remesas:** Debido a que es el dinero que reciben los hogares en México enviado por familiares en el extranjero, si aumenta esta varible significa que las familias reciben un ingreso mayor, lo cual puede volverse una causa para que la probabiliddad del impago en la tarjeta de crédito se reduzca.
+
+- **Ahorro:** Este indicador del Ahorro Bruto indica si las empresas o personas cuentan con recursos disponibles debido a que consumen menos de lo que ganan, entonces si un hogar tiene un nivel menor de ahorro, cuando se presenten dificultades económicas puede dejar de pagar sus deudas para cubrir solo sus necesidades básicas, provocando un incumplimiento en los pagos de sus tarjetas.
+
+\newpage
+
+# BANAMEX
+
+El siguiente banco con el que se realizará el análisis es **Banamex**, así que hay que obtener el Score de los datos importados:
+
+```{r}
+# Score para Banamex
+Banamex_Score<- PD_bancos %>% 
+         select(Banamex) %>% 
+         mutate(Banamex = log((Banamex/100) / (1-(Banamex / 100))))
+colnames(Banamex_Score)<-"Score_Banamex"
+kable(head(Banamex_Score,10),align="c")
+
+# Cambiar datos por los de Banamex
+variables_modelo<-data.frame(Banamex_Score,variables_modelo[-1])
+```
+
+## REGRESIÓN MÚLTIPLE
+
+```{r}
+# Regresión Múltiple
+predictoras<-colnames(variables_modelo)[-1]  # El Score se elimina de los nombres
+respuesta<-colnames(variables_modelo)[1]  # Variable de Respuesta
+formula_str<-paste(respuesta,"~",paste(predictoras,collapse = "+"))
+Banamex_reg_mult<-lm(as.formula(formula_str),data=variables_modelo)
+summary(Banamex_reg_mult)
+AIC(Banamex_reg_mult)
+```
+
+Se eliminarán las variables que no son significativas para el modelo y solo se dejaran las significativas, para que el modelo se ajuste mejor y tenga más valor cada una de las variables a trabajar.
+```{r}
+# VARIABLES SIGNIFICATIVAS
+resumen<-summary(Banamex_reg_mult)
+significativas<-rownames(resumen$coefficients)[resumen$coefficients[,4]<0.05]
+significativas<-significativas[significativas!="(Intercept)"] # excluir intercepto B0
+significativas
+```
+
+```{r}
+# Regresión Múltiple
+respuesta<-colnames(variables_modelo)[1]  # Variable de Respuesta
+formula_str<-paste(respuesta,"~",paste(significativas,collapse = "+"))
+Banamex_reg_mult<-lm(as.formula(formula_str),data=variables_modelo)
+summary(Banamex_reg_mult)
+```
+
+```{r}
+# VARIABLES SIGNIFICATIVAS
+resumen<-summary(Banamex_reg_mult)
+significativas<-rownames(resumen$coefficients)[resumen$coefficients[,4]<0.05]
+significativas<-significativas[significativas!="(Intercept)"] # excluir intercepto B0
+significativas
+
+# BETAS
+coef(Banamex_reg_mult)
+```
+
+```{r}
+# Cálculo del Score y de la PD estimada
+comparacion<-data.frame(PD_Banamex=PD_bancos$Banamex / 100,Banamex_Score)
+
+comparacion<- comparacion %>% 
+              mutate(Score_Predicho = as.numeric(predict(Banamex_reg_mult))) %>%
+              mutate(PD_Predicha=1/(1+exp(-1*Score_Predicho)))
+kable(head(comparacion,10),align = "cccc")
+```
+
+
+```{r,fig.width=6.5,fig.height=3.6,fig.align='center'}
+# Gráfica
+plot(comparacion$PD_Banamex,type="l",lwd=2,ylim=c(0,0.20),
+     main="Banamex: PD Regresión Múltiple",
+     xlab="Meses",ylab="Probabilidad de Incumplimiento")
+lines(comparacion$PD_Predicha,type="l",col="red",lwd=2)
+legend(40, 0.1, legend=c("PD Banamex", "PD Regresión Múltiple"),
+       col=c("black", "red"),lwd=2,lty=1,cex=0.8)
+```
+
+## PENALIZACIÓN RIDGE
+
+```{r}
+# Validación Cruzada
+x1<-as.matrix(variables_modelo[-1])
+y1<-as.matrix(PD_bancos$Banamex)
+lambda_max<-max(abs(t(x1)%*%y1))/nrow(x1)
+cv.lambda<-cv.glmnet(x=x1,y=y1,alpha=0,lambda=exp(seq(log(lambda_max), log(lambda_max / 1000),
+                    length.out = 100)),nfolds = 10)  # ridge
+plot(cv.lambda)
+lmin<-cv.lambda$lambda.min   # penalización
+lmin
+```
+
+```{r}
+# Coeficientes
+Banamex_ridge<-glmnet(x=x1,y=y1,alpha=0,lambda = lmin)
+summary(Banamex_ridge)
+coef(Banamex_ridge)
+```
+
+```{r}
+# Predicciones del Score y la PD con la Penalización Ridge
+comparacion<-data.frame(PD_Banamex=PD_bancos$Banamex / 100,Banamex_Score)
+
+comparacion<- comparacion %>% 
+              mutate(PD_Ridge=as.numeric(predict(Banamex_ridge,newx=x1))/100)%>% 
+              mutate(Score_Ridge = log(PD_Ridge/(1-PD_Ridge))) %>%
+              mutate(Cuadrado_Errores=(PD_Banamex -PD_Ridge)^2,
+                     Cuadrado_Total=(PD_Banamex-mean(PD_Banamex))^2)
+kable(head(comparacion),align = "cccccc")
+```
+
+```{r,fig.width=6.5,fig.height=3.6,fig.align='center'}
+# Gráfica de la Penalización Ridge
+plot(comparacion$PD_Banamex,type="l",lwd=2,ylim=c(0,0.20),
+     main="Banamex:PD con Penalización Ridge",
+ xlab="Meses",ylab="Probabilidad de Incumplimiento")
+lines(comparacion$PD_Ridge,type="l",col="blue",lwd=2)
+legend(40,0.1,legend=c("PD Banamex", "PD Ridge"),
+ col=c("black","blue"),lwd=2,lty=1,cex=0.8)
+```
+\newpage
+
+
+```{r}
+cat("El coeficiente de determinación R^2 ajustado es: ",adj_r_cuadrado(comparacion))
+# Cálculo del error para la penalización Ridge
+MAE_Ridge <- mean(abs(comparacion$PD_Banamex-comparacion$PD_Ridge))
+MSE_Ridge <- mean((comparacion$PD_Banamex-comparacion$PD_Ridge)^2)
+RMSE_Ridge <- sqrt(MSE_Ridge)
+MAPE_Ridge <- mean(abs((comparacion$PD_Banamex-comparacion$PD_Ridge)/comparacion$PD_Banamex))*100
+
+# Mostrar resultados
+cat("MAE Ridge:", MAE_Ridge, "\n")
+cat("MSE Ridge:", MSE_Ridge, "\n")
+cat("RMSE Ridge:", RMSE_Ridge, "\n")
+cat("MAPE Ridge:", MAPE_Ridge, "%\n")
+```
+
+\newpage
+
+## PENALIZACIÓN LASSO
+
+```{r}
+# Validación Cruzada
+x1<-as.matrix(variables_modelo[-1])
+y1<-as.matrix(PD_bancos$Banamex)
+lambda_max<-max(abs(t(x1)%*%y1))/nrow(x1)
+cv.lambda<-cv.glmnet(x=x1,y=y1,alpha=1,lambda=exp(seq(log(lambda_max), log(lambda_max / 1000),
+                                       length.out = 100)),nfolds = 10) # lasso
+plot(cv.lambda)
+title("Penalización Lasso", line = 2.5)
+lmin<-cv.lambda$lambda.min   # penalización
+lmin
+```
+
+```{r}
+# Coeficientes
+Banamex_lasso<-glmnet(x=x1,y=y1,alpha=1,lambda = lmin)
+summary(Banamex_lasso)
+coef(Banamex_lasso)
+```
+
+```{r}
+# Predicciones del Score y la PD con la Penalización Lasso
+comparacion<-data.frame(PD_Banamex=PD_bancos$Banamex / 100,Banamex_Score)
+
+comparacion<- comparacion %>% 
+  mutate(PD_Lasso=as.numeric(predict(Banamex_lasso,newx=x1)) / 100) %>% 
+  mutate(Score_Lasso = log(PD_Lasso/(1-PD_Lasso))) %>% 
+  mutate(Cuadrado_Errores=(PD_Banamex -PD_Lasso)^2,Cuadrado_Total=(PD_Banamex-mean(PD_Banamex))^2)
+kable(head(comparacion),align = "cccccc")
+```
+
+```{r,fig.width=6.5,fig.height=3.6,fig.align='center'}
+# Gráfica de la Penalización Lasso
+plot(comparacion$PD_Banamex,type="l",lwd=2,ylim=c(0,0.20),
+     main="Total Banamex: PD con Penalización Lasso",
+     xlab="Meses",ylab="Probabilidad de Incumplimiento")
+lines(comparacion$PD_Lasso,type="l",lwd=2,col="green4")
+legend(40, 0.1, legend=c("PD Banamex", "PD Lasso"),
+       col=c("black", "green4"),lwd = 2,lty=1,cex=0.8)
+```
+\newpage
+```{r}
+cat("El coeficiente de determinación R^2 ajustado es: ",adj_r_cuadrado(comparacion))
+
+# Cálculo del error para la penalización Lasso
+MAE_Lasso <- mean(abs(comparacion$PD_Banamex-comparacion$PD_Lasso))
+MSE_Lasso <- mean((comparacion$PD_Banamex-comparacion$PD_Lasso)^2)
+RMSE_Lasso <- sqrt(MSE_Lasso)
+MAPE_Lasso <- mean(abs((comparacion$PD_Banamex-comparacion$PD_Lasso)/comparacion$PD_Banamex))*100
+
+# Mostrar resultados
+cat("MAE Lasso:", MAE_Lasso, "\n")
+cat("MSE Lasso:", MSE_Lasso, "\n")
+cat("RMSE Lasso:", RMSE_Lasso, "\n")
+cat("MAPE Lasso:", MAPE_Lasso, "%\n")
+```
+\newpage
+
+## PENALIZACIÓN ELASTIC NET
+
+```{r}
+# Validación Cruzada
+x1<-as.matrix(variables_modelo[-1])
+y1<-as.matrix(PD_bancos$Banamex)
+lambda_max<-max(abs(t(x1)%*%y1))/nrow(x1)
+cv.lambda<-cv.glmnet(x=x1,y=y1,alpha=0.5,lambda=exp(seq(log(lambda_max), log(lambda_max / 1000),
+                                        length.out = 100)),nfolds = 10) # elastic net
+plot(cv.lambda)
+title("Penalización Elastic Net", line = 2.5)
+lmin<-cv.lambda$lambda.min   # penalización
+lmin
+```
+
+```{r}
+# Coeficientes
+Banamex_elastic_net<-glmnet(x=x1,y=y1,alpha=0.5,lambda = lmin)
+summary(Banamex_elastic_net)
+coef(Banamex_elastic_net)
+```
+
+```{r}
+# Predicciones del Score y la PD con la Penalización Elastic Net
+comparacion<-data.frame(PD_Banamex=PD_bancos$Banamex / 100,Banamex_Score)
+
+comparacion<- comparacion %>% 
+  mutate(PD_Elastic_Net=as.numeric(predict(Banamex_elastic_net,newx=x1)) / 100) %>% 
+  mutate(Score_Elastic_Net = log(PD_Elastic_Net/(1-PD_Elastic_Net))) %>% 
+  mutate(Cuadrado_Errores=(PD_Banamex-PD_Elastic_Net)^2,Cuadrado_Total=(PD_Banamex-mean(PD_Banamex))^2)
+kable(head(comparacion),align = "cccccc")
+```
+
+```{r,fig.width=6.5,fig.height=3.6,fig.align='center'}
+# Gráfica de la Penalización Elastic Net
+plot(comparacion$PD_Banamex,type="l",lwd=2,ylim=c(0,0.20),
+     main="Total Banamex: PD con Penalización Elastic Net",
+     xlab="Meses",ylab="Probabilidad de Incumplimiento")
+lines(comparacion$PD_Elastic_Net,type="l",col="orange2",lwd=2)
+legend(40, 0.1, legend=c("PD Banamex", "PD Elastic Net"),
+       col=c("black", "orange2"),lwd=2,lty=1,cex=0.8)
+```
+\newpage
+```{r}
+cat("El coeficiente de determinación R^2 ajustado es: ",adj_r_cuadrado(comparacion))
+
+# Cálculo del error para la penalización Elastic Net
+MAE_Elastic_Net <- mean(abs(comparacion$PD_Banamex-comparacion$PD_Elastic_Net))
+MSE_Elastic_Net <- mean((comparacion$PD_Banamex-comparacion$PD_Elastic_Net)^2)
+RMSE_Elastic_Net <- sqrt(MSE_Elastic_Net)
+MAPE_Elastic_Net <- mean(abs((comparacion$PD_Banamex-comparacion$PD_Elastic_Net)/comparacion$PD_Banamex))*100
+
+# Mostrar resultados
+cat("MAE Elastic Net:", MAE_Elastic_Net, "\n")
+cat("MSE Elastic Net:", MSE_Elastic_Net, "\n")
+cat("RMSE Elastic Net:", RMSE_Elastic_Net, "\n")
+cat("MAPE Elastic Net:", MAPE_Elastic_Net, "%\n")
+```
+\newpage
+
+## RESULTADOS
+
+```{r}
+# ANOVA
+anova(Banamex_reg_mult)
+AIC(Banamex_reg_mult)
+```
+
+```{r}
+# VERIFICACIÓN DE SUPUESTOS
+supuestos<-function(modelo){
+  # R^2 Ajustado
+  r_2<-summary(modelo)$adj.r.squared
+  # Media Cero
+  media<-mean(residuals(modelo))
+  # Homogeneidad de Varianza
+  breuch_pagan<-bptest(modelo)$p.value[[1]]
+  # Normalidad
+  anderson_darling<-ad.test(residuals(modelo))$p.value
+  # Independencia
+  durbin_watson<-dwtest(modelo)$statistic[[1]]
+  
+  return(c(cat("El r cuadrado ajustado es: ",r_2,"\n"),
+           cat("La media de los errores es:", media,"\n"),
+           cat("El valor p para la prueba de Homoscedasticidad de Varianza es ",
+               breuch_pagan,"\n"),
+           cat("El valor p para la prueba de Normalidad de los errores es ",
+               anderson_darling,"\n"),
+           cat("El estadístico para la prueba de Autocorrelación de los errores es ",
+               durbin_watson )))
+}
+supuestos(Banamex_reg_mult)
+```
+
+\newpage
+
+## INTERPRETACIÓN
+
+Respecto a la regresión, el R² de 0.88 es bueno pero se debe tener cuidado  ya que **Banamex** es el primer banco en el que no se cumplen dos de los supuestos, el de **Autocorrelación** (el DW sigue indicando autocorrelación positiva al no ser cercano a 2) y ahora el de **Varianza Constante** (prueba de Breusch Pagan con un valor p menor al nivel de significancia), lo que sugiere problemas de heterocedasticidad, es decir, la varianza de los errores no es constante, por lo que el análisis de los modelos con penalización se hará de forma más detallada para ver el modelo que predice con menos errores.
+
+El modelo con penalización **Ridge** tiene un rendimiento muy bueno. El R^2 ajustado es de 0.9397, lo que indica que explica casi el 94% de la variabilidad de los datos. El MAE es de 0.00592 y el RMSE de 0.00736, lo que muestra que los errores de predicción son muy pequeños. Además, el MAPE es de solo 4.65%, lo cual es excelente. En general, el modelo Ridge es preciso, consistente y tiene un muy buen ajuste.
+
+El modelo con penalización **Lasso**  también muestra un buen desempeño. El R^2 ajustado es de 0.9382, lo que indica que explica aproximadamente el 93.8% de la variabilidad. El MAE es de 0.00602 y el RMSE de 0.00745, valores bajos que indican precisión en las predicciones. El MAPE es de 4.76%, apenas un poco mayor que en Ridge. En resumen, Lasso es eficaz, aunque ligeramente menos preciso que Ridge.
+
+Los resultados obtenidos del modelo **Elastic Net**  presenta el mejor desempeño entre los tres. Tiene un R^2 ajustado de 0.9401, el más alto, lo que indica que explica el 94% de la variabilidad. Sus errores también son los más bajos: MAE de 0.00590, RMSE de 0.00734 y un MAPE de 4.64%, lo que refleja predicciones más precisas y consistentes. En conjunto, es el modelo más equilibrado y eficiente.
+
+De todos ellos, Elastic Net es el que ofrece el mejor balance general: tiene el R^2 ajustado más alto (0.9401) y los errores más bajos, lo que lo convierte en la mejor opción para reemplazar al modelo base y obtener predicciones más precisas y robustas.
+
+El **ANOVA** indica que todas las variables tienen un impacto significativo en Score_Banamex, lo que sugiere que el desempeño financiero está influenciado por factores económicos clave. **SMG** (Salario Mínimo General) es la variable con mayor peso, lo que refleja la relación entre el poder adquisitivo y la actividad financiera. **Prod_Edif** (Producción del sector de edificaciones) también es relevante, ya que el crecimiento en construcción impulsa el empleo y la inversión. **Ing_Gob** (Ingresos del Gobierno) y **Deuda_Pub** (Deuda Pública) afectan la estabilidad económica y la percepción de riesgo, lo que repercute en el sistema financiero. **TC** (Tipo de Cambio) es crucial, pues su volatilidad influye en la inversión y el comercio. Las tasas de interés (TICH y TIN) determinan el acceso al crédito y el ahorro, mientras que los ingresos laborales (RMRPO) y las remesas en manufactura (Rem_Manu) reflejan el impacto del empleo en la economía.
+
+\newpage
+
+# SANTANDER
+
+Siguiendo el procedimiento anterior con **Santander**.
+
+```{r}
+# Score de Santander
+
+SANTANDER_Score <- PD_bancos %>% 
+  select(Santander) %>% 
+  mutate(Santander=log((Santander/100)/(1-(Santander/100))))
+colnames(SANTANDER_Score) <- "Score_Santander"
+kable(head(SANTANDER_Score,10),align = "c")
+```
+
+```{r}
+# Cambiar datos por los de Santander
+variables_modelo<-data.frame(SANTANDER_Score,variables_modelo[-1])
+```
+
+## REGRESIÓN MÚLTIPLE
+
+```{r}
+predictoras<-colnames(variables_modelo)[-1]  # El Score se elimina de los nombres
+respuesta<-colnames(variables_modelo)[1]  # Variable de Respuesta
+formula_str<-paste(respuesta,"~",paste(predictoras,collapse = "+"))
+SANT_reg_mult<-lm(as.formula(formula_str),data=variables_modelo)
+modelo_completo<-SANT_reg_mult
+summary(SANT_reg_mult)
+```
+
+```{r}
+# VARIABLES SIGNIFICATIVAS
+resumen<-summary(SANT_reg_mult)
+significativas<-rownames(resumen$coefficients)[resumen$coefficients[,4]<0.05]
+significativas<-significativas[significativas!="(Intercept)"] # excluir intercepto B0
+significativas
+```
+
+```{r}
+# Segundo modelo
+respuesta<-colnames(variables_modelo)[1]  # Variable de Respuesta
+formula_str<-paste(respuesta,"~",paste(significativas,collapse = "+"))
+SANT_reg_mult<-lm(as.formula(formula_str),data=variables_modelo)
+summary(SANT_reg_mult)
+```
+
+```{r}
+# VARIABLES SIGNIFICATIVAS
+resumen<-summary(SANT_reg_mult)
+significativas<-rownames(resumen$coefficients)[resumen$coefficients[,4]<0.05]
+significativas<-significativas[significativas!="(Intercept)"] # excluir intercepto B0
+significativas
+```
+
+```{r}
+# Tercer modelo
+respuesta<-colnames(variables_modelo)[1]  # Variable de Respuesta
+formula_str<-paste(respuesta,"~",paste(significativas,collapse = "+"))
+SANT_reg_mult<-lm(as.formula(formula_str),data=variables_modelo)
+summary(SANT_reg_mult)
+
+# Betas.
+
+coef(SANT_reg_mult)
+```
+\newpage
+
+```{r}
+# Cálculo del Score y de la PD estimada
+comparacion<-data.frame(PD_SANT=PD_bancos$Santander / 100,SANTANDER_Score)
+
+comparacion<- comparacion %>% 
+              mutate(Score_Predicho = as.numeric(predict(SANT_reg_mult))) %>%
+              mutate(PD_Predicha=1/(1+exp(-1*Score_Predicho)))
+
+kable(head(comparacion,10),align = "cccc")
+```
+
+\newpage
+
+```{r}
+# Gráfica
+plot(comparacion$PD_SANT,type="l",lwd=2,ylim=c(0,0.20),
+     main="PD Regresión Múltiple",
+     xlab="Meses",ylab="Probabilidad de Incumplimiento")
+lines(comparacion$PD_Predicha,type="l",col="red",lwd=2)
+legend(40, 0.1, legend=c("PD Santander", "PD Regresión Múltiple"),
+       col=c("black", "red"),lwd=2,lty=1,cex=0.8)
+```
+
+\newpage
+
+## PENALIZACIÓN RIDGE
+
+```{r,fig.align='center'}
+# Validación Cruzada
+x1<-as.matrix(variables_modelo[-1])
+y1<-as.matrix(PD_bancos$Santander)
+cv.lambda<-cv.glmnet(x=x1,y=y1,alpha=0,lambda=exp(seq(log(lambda_max), log(lambda_max / 1000),
+                    length.out = 100)),nfolds = 10)  # ridge
+plot(cv.lambda)
+title("Penalización Ridge", line = 2.5)
+
+# Mejor valor lambda encontrado
+# ==============================================================================
+paste("Mejor valor de lambda encontrado:", cv.lambda$lambda.min)
+```
+
+
+Después se obtienen los coeficientes del modelo que ayudarán a calcular la PD
+
+```{r}
+# Coeficientes
+SANT_ridge<-glmnet(x=x1,y=y1,alpha=0,lambda = cv.lambda$lambda.min)
+summary(SANT_ridge)
+coef(SANT_ridge)
+```
+
+\newpage
+
+Nuevamente se va a comparar las predicciones del modelo con los datos reales para ver los ajustes que se realizaron y ver si puede predecir de mejor manera. Además, obtener el valor del coeficiente de determinación ayudará a entender el porcentaje de variabilidad que es explicado por el modelo, así que se agregarán dos columnas más para los errores al cuadrado y el total de los cuadrados que son necesarios para calcularlo.
+
+```{r}
+# Predicciones del Score y la PD con la Penalización Ridge
+comparacion<-data.frame(PD_SANT=PD_bancos$Santander / 100,SANTANDER_Score)
+
+comparacion<- comparacion %>% 
+              mutate(PD_Ridge=as.numeric(predict(SANT_ridge,newx=x1)) / 100) %>% 
+              mutate(Score_Ridge = log(PD_Ridge/(1-PD_Ridge))) %>%
+              mutate(Cuadrado_Errores=(PD_SANT -PD_Ridge)^2,Cuadrado_Total=(PD_SANT-mean(PD_SANT))^2)
+kable(head(comparacion),align = "cccccc")
+```
+
+```{r,fig.width=6.5,fig.height=3.6,fig.align='center'}
+# Gráfica de la Penalización Ridge
+plot(comparacion$PD_SANT,type="l",lwd=2,ylim=c(0,0.20),
+     main="Total Banca Múltiple: PD con Penalización Ridge",
+     xlab="Meses",ylab="Probabilidad de Incumplimiento")
+lines(comparacion$PD_Ridge,type="l",col="blue",lwd=2)
+legend(40, 0.1, legend=c("PD Santander", "PD Ridge"),
+       col=c("black", "blue"),lwd=2,lty=1,cex=0.8)
+```
+
+Por último se procede a calcular el R^2 ajustado que servirá para comparar los modelos dependiendo la penalización utilizada mediante una función que recibe como argumento el dataframe donde están las columnas necesarias de los errores al cuadrado y el total de los cuadrados.
+
+```{r}
+# Función que calcula el R^2 ajustado
+adj_r_cuadrado<-function(df){
+  numerador<-sum(df$Cuadrado_Errores)/(120 - length(variables_modelo[-1])-1)
+  denominador<-sum(df$Cuadrado_Total) / (120-1)
+  return(1-(numerador / denominador))}
+cat("El coeficiente de determinación R^2 ajustado es: ",adj_r_cuadrado(comparacion))
+```
+
+```{r}
+# Cálculo del error para la penalización Ridge
+MAE_Ridge <- mean(abs(comparacion$PD_SANT - comparacion$PD_Ridge))
+MSE_Ridge <- mean((comparacion$PD_SANT - comparacion$PD_Ridge)^2)
+RMSE_Ridge <- sqrt(MSE_Ridge)
+MAPE_Ridge <- mean(abs((comparacion$PD_SANT - comparacion$PD_Ridge) / comparacion$PD_SANT)) * 100
+
+# Mostrar resultados
+cat("MAE Ridge:", MAE_Ridge, "\n")
+cat("MSE Ridge:", MSE_Ridge, "\n")
+cat("RMSE Ridge:", RMSE_Ridge, "\n")
+cat("MAPE Ridge:", MAPE_Ridge, "%\n")
+```
+
+\newpage
+
+## PENALIZACIÓN LASSO
+
+```{r}
+# Validación Cruzada
+x1<-as.matrix(variables_modelo[-1])
+y1<-as.matrix(PD_bancos$Santander)
+lambda_max<-max(abs(t(x1)%*%y1))/nrow(x1)
+cv.lambda<-cv.glmnet(x=x1,y=y1,alpha=1,lambda=exp(seq(log(lambda_max), log(lambda_max / 1000),
+                                       length.out = 100)),nfolds = 10) # lasso
+plot(cv.lambda)
+title("Penalización Lasso", line = 2.5)
+
+# Mejor valor lambda encontrado
+# ==============================================================================
+paste("Mejor valor de lambda encontrado:", cv.lambda$lambda.min)
+```
+
+```{r}
+# Coeficientes
+SANT_lasso<-glmnet(x=x1,y=y1,alpha=1,lambda = cv.lambda$lambda.min)
+summary(SANT_lasso)
+coef(SANT_lasso)
+```
+
+\newpage
+
+Nuevamente se va a comparar las predicciones del modelo con los datos reales para ver los ajustes que se realizaron y ver si puede predecir de mejor manera. Además, obtener el valor del coeficiente de determinación ayudará a entender el porcentaje de variabilidad que es explicado por el modelo, así que se agregarán dos columnas más para los errores al cuadrado y el total de los cuadrados que son necesarios para calcularlo.
+
+```{r}
+# Predicciones del Score y la PD con la Penalización Lasso
+comparacion<-data.frame(PD_SANT=PD_bancos$Santander / 100,SANTANDER_Score)
+
+comparacion<- comparacion %>% 
+              mutate(PD_Lasso=as.numeric(predict(SANT_lasso,newx=x1)) / 100) %>% 
+              mutate(Score_Lasso = log(PD_Lasso/(1-PD_Lasso))) %>% 
+              mutate(Cuadrado_Errores=(PD_SANT -PD_Lasso)^2,Cuadrado_Total=(PD_SANT-mean(PD_SANT))^2)
+kable(head(comparacion),align = "cccccc")
+```
+
+```{r,fig.width=6.5,fig.height=3.6,fig.align='center'}
+# Gráfica de la Penalización Lasso
+plot(comparacion$PD_SANT,type="l",lwd=2,ylim=c(0,0.20),
+     main="Total Banca Múltiple: PD con Penalización Lasso",
+     xlab="Meses",ylab="Probabilidad de Incumplimiento")
+lines(comparacion$PD_Lasso,type="l",lwd=2,col="green4")
+legend(40, 0.1, legend=c("PD Santander", "PD Lasso"),
+      col=c("black", "green4"),lwd = 2,lty=1,cex=0.8)
+```
+
+```{r}
+cat("El coeficiente de determinación R^2 ajustado es: ",adj_r_cuadrado(comparacion))
+```
+
+```{r}
+# Cálculo del error para la penalización Lasso
+MAE_Lasso <- mean(abs(comparacion$PD_SANT - comparacion$PD_Lasso))
+MSE_Lasso <- mean((comparacion$PD_SANT - comparacion$PD_Lasso)^2)
+RMSE_Lasso <- sqrt(MSE_Lasso)
+MAPE_Lasso <- mean(abs((comparacion$PD_SANT - comparacion$PD_Lasso) / comparacion$PD_SANT)) * 100
+
+# Mostrar resultados
+cat("MAE Lasso:", MAE_Lasso, "\n")
+cat("MSE Lasso:", MSE_Lasso, "\n")
+cat("RMSE Lasso:", RMSE_Lasso, "\n")
+cat("MAPE Lasso:", MAPE_Lasso, "%\n")
+```
+
+
+\newpage
+
+## PENALIZACIÓN ELASTIC NET
+
+Se eligió como valor $\alpha = 0.2 , \alpha=0.8$, para hallar el valor adecuado de $\lambda$ se va a utilizar la librería **glmnet** y también la información de las variables con la Probabilidad de Incumplimiento.
+
+```{r}
+# Validación Cruzada más cercano a Ridge (0.2)
+x1<-as.matrix(variables_modelo[-1])
+y1<-as.matrix(PD_bancos$Santander)
+lambda_max<-max(abs(t(x1)%*%y1))/nrow(x1)
+cv.lambda<-cv.glmnet(x=x1,y=y1,alpha=0.2,lambda=exp(seq(log(lambda_max), log(lambda_max / 1000),
+                                        length.out = 100)),nfolds = 10) # elastic net
+plot(cv.lambda)
+title("Penalización Elastic Net-Ridge", line = 2.5)
+
+# Mejor valor lambda encontrado
+# ==============================================================================
+paste("Mejor valor de lambda encontrado:", cv.lambda$lambda.min)
+```
+
+```{r}
+# Coeficientes - EN-Ridge
+SANT_elastic_net<-glmnet(x=x1,y=y1,alpha=0.2,lambda = cv.lambda$lambda.min)
+summary(SANT_elastic_net)
+coef(SANT_elastic_net)
+```
+
+\newpage
+
+Nuevamente se va a comparar las predicciones del modelo con los datos reales para ver los ajustes que se realizaron y ver si puede predecir de mejor manera. Además, obtener el valor del coeficiente de determinación ayudará a entender el porcentaje de variabilidad que es explicado por el modelo, así que se agregarán dos columnas más para los errores al cuadrado y el total de los cuadrados que son necesarios para calcularlo.
+```{r}
+# Predicciones del Score y la PD con la Penalización Elastic Net
+comparacion<-data.frame(PD_SANT=PD_bancos$Santander / 100,SANTANDER_Score)
+
+comparacion<- comparacion %>% 
+              mutate(PD_Elastic_Net=as.numeric(predict(SANT_elastic_net,newx=x1)) / 100) %>% 
+              mutate(Score_Elastic_Net = log(PD_Elastic_Net/(1-PD_Elastic_Net))) %>% 
+              mutate(Cuadrado_Errores=(PD_SANT-PD_Elastic_Net)^2,Cuadrado_Total=(PD_SANT-mean(PD_SANT))^2)
+kable(head(comparacion),align = "cccccc")
+```
+
+```{r,fig.width=6.5,fig.height=3.6,fig.align='center'}
+# Gráfica de la Penalización Elastic Net
+plot(comparacion$PD_SANT,type="l",lwd=2,ylim=c(0,0.20),
+     main="Total Banca Múltiple: PD con Penalización Elastic Net-Ridge",
+     xlab="Meses",ylab="Probabilidad de Incumplimiento")
+lines(comparacion$PD_Elastic_Net,type="l",col="orange2",lwd=2)
+legend(40, 0.1, legend=c("PD Santander", "PD Elastic Net-Ridge"),
+       col=c("black", "orange2"),lwd=2,lty=1,cex=0.8)
+```
+
+```{r}
+cat("El coeficiente de determinación R^2 ajustado es: ",adj_r_cuadrado(comparacion))
+```
+
+```{r}
+# Cálculo del error para la penalización Elastic Net
+MAE_Elastic_Net <- mean(abs(comparacion$PD_SANT - comparacion$PD_Elastic_Net))
+MSE_Elastic_Net <- mean((comparacion$PD_SANT - comparacion$PD_Elastic_Net)^2)
+RMSE_Elastic_Net <- sqrt(MSE_Elastic_Net)
+MAPE_Elastic_Net <- mean(abs((comparacion$PD_SANT - comparacion$PD_Elastic_Net) / comparacion$PD_SANT)) * 100
+
+# Mostrar resultados
+cat("MAE Elastic Net-Ridge:", MAE_Elastic_Net, "\n")
+cat("MSE Elastic Net-Ridge:", MSE_Elastic_Net, "\n")
+cat("RMSE Elastic Net-Ridge:", RMSE_Elastic_Net, "\n")
+cat("MAPE Elastic Net-Ridge:", MAPE_Elastic_Net, "%\n")
+```
+\newpage
+
+## PENALIZACIÓN ELASTIC NET-LASSO
+
+Como complemento se agregará un modelo de penalización cuando el valor de alpha es más grande $\alpha=0.8$, esto indica que existirá un 80% de peso para la penalización Lasso y el resto para la Ridge, contrario a lo que se hizo con los datos de Banorte.
+
+```{r}
+# Validación Cruzada más cercano a Lasso (0.8)
+x1<-as.matrix(variables_modelo[-1])
+y1<-as.matrix(PD_bancos$Santander)
+lambda_max<-max(abs(t(x1)%*%y1))/nrow(x1)
+cv.lambda<-cv.glmnet(x=x1,y=y1,alpha=0.8,lambda=exp(seq(log(lambda_max), log(lambda_max / 1000),
+                                        length.out = 100)),nfolds = 10) # elastic net
+plot(cv.lambda)
+title("Penalización Elastic Net-Lasso", line = 2.5)
+
+# Mejor valor lambda encontrado
+# ==============================================================================
+paste("Mejor valor de lambda encontrado:", cv.lambda$lambda.min)
+```
+
+Después se obtienen los coeficientes del modelo que ayudarán a calcular la PD.
+
+```{r}
+# Coeficientes - EN-Lasso
+SANT_elastic_net<-glmnet(x=x1,y=y1,alpha=0.8,lambda = cv.lambda$lambda.min)
+summary(SANT_elastic_net)
+coef(SANT_elastic_net)
+```
+
+\newpage
+
+Nuevamente se va a comparar las predicciones del modelo con los datos reales para ver los ajustes que se realizaron y ver si puede predecir de mejor manera. Además, obtener el valor del coeficiente de determinación ayudará a entender el porcentaje de variabilidad que es explicado por el modelo, así que se agregarán dos columnas más para los errores al cuadrado y el total de los cuadrados que son necesarios para calcularlo.
+```{r}
+# Predicciones del Score y la PD con la Penalización Elastic Net
+comparacion<-data.frame(PD_SANT=PD_bancos$Santander / 100,SANTANDER_Score)
+
+comparacion<- comparacion %>% 
+              mutate(PD_Elastic_Net=as.numeric(predict(SANT_elastic_net,newx=x1)) / 100) %>% 
+              mutate(Score_Elastic_Net = log(PD_Elastic_Net/(1-PD_Elastic_Net))) %>% 
+              mutate(Cuadrado_Errores=(PD_SANT-PD_Elastic_Net)^2,Cuadrado_Total=(PD_SANT-mean(PD_SANT))^2)
+kable(head(comparacion),align = "cccccc")
+```
+
+```{r,fig.width=5.4,fig.height=3.6,fig.align='center'}
+# Gráfica de la Penalización Elastic Net
+plot(comparacion$PD_SANT,type="l",lwd=2,ylim=c(0,0.20),
+     main="Total Banca Múltiple: PD con Penalización Elastic Net-Lasso",
+     xlab="Meses",ylab="Probabilidad de Incumplimiento")
+lines(comparacion$PD_Elastic_Net,type="l",col="purple3",lwd=2)
+legend(40, 0.1, legend=c("PD Santander", "PD Elastic Net-Lasso"),
+       col=c("black", "purple3"),lwd=2,lty=1,cex=0.8)
+```
+
+```{r}
+cat("El coeficiente de determinación R^2 ajustado es: ",adj_r_cuadrado(comparacion))
+```
+
+```{r}
+# Cálculo del error para la penalización Elastic Net
+MAE_Elastic_Net <- mean(abs(comparacion$PD_SANT - comparacion$PD_Elastic_Net))
+MSE_Elastic_Net <- mean((comparacion$PD_SANT - comparacion$PD_Elastic_Net)^2)
+RMSE_Elastic_Net <- sqrt(MSE_Elastic_Net)
+MAPE_Elastic_Net <- mean(abs((comparacion$PD_SANT - comparacion$PD_Elastic_Net) / comparacion$PD_SANT)) * 100
+
+# Mostrar resultados
+cat("MAE Elastic Net-Lasso:", MAE_Elastic_Net, "\n")
+cat("MSE Elastic Net-Lasso:", MSE_Elastic_Net, "\n")
+cat("RMSE Elastic Net-Lasso:", RMSE_Elastic_Net, "\n")
+cat("MAPE Elastic Net-Lasso:", MAPE_Elastic_Net, "%\n")
+```
+
+\newpage
+
+## RESULTADOS
+
+Lo que se va a hacer es un Análisis de Varianza **ANOVA** para el modelo de regresión múltiple, así como la verificación de los 4 supuestos para los errores (Media igual a cero, Normalidad, Independencia y Varianza constante) a través del valor p con las pruebas adecuadas para cada uno. Al final se van a comparar los modelos que presentan penalización y también se dará una interpretación de lo que representan las variables ante el planteamiento de que las personas dejen de pagar sus tarjetas de crédito.
+
+```{r}
+# ANOVA
+anova(SANT_reg_mult)
+AIC(SANT_reg_mult)
+```
+
+```{r,warning=FALSE,message=FALSE}
+# VERIFICACIÓN DE SUPUESTOS
+supuestos<-function(modelo){
+  # R^2 Ajustado
+  r_2<-summary(modelo)$adj.r.squared
+  # Media Cero
+  media<-mean(residuals(modelo))
+  # Homogeneidad de Varianza
+  breuch_pagan<-bptest(modelo)$p.value[[1]]
+  # Normalidad
+  anderson_darling<-ad.test(residuals(modelo))$p.value
+  # Independencia
+  durbin_watson<-dwtest(modelo)$statistic[[1]]
+  
+  return(c(cat("El r cuadrado ajustado es: ",r_2,"\n"),
+           cat("La media de los errores es:", media,"\n"),
+           cat("El valor p para la prueba de Homoscedasticidad de Varianza es ",
+               breuch_pagan,"\n"),
+           cat("El valor p para la prueba de Normalidad de los errores es ",
+               anderson_darling,"\n"),
+           cat("El estadístico para la prueba de Autocorrelación de los errores es ",
+               durbin_watson )))
+}
+supuestos(SANT_reg_mult)
+```
+
+\newpage
+
+## INTERPRETACÓN
+
+El modelo tiene un alto poder explicativo, como lo indica el **R-cuadrado** de 0.7225. Todas las variables incluidas en el modelo son estadísticamente significativas, lo que sugiere que cada una de ellas contribuye significativamente a la predicción de Santander, algunas con un impacto positivo (lo que sugiere que aumentos en estas variables están asociados con un aumento en el score) y otras con un impacto negativo (lo que indica que aumentos en estas variables están asociados con una disminución en el score).
+
+Lo siguiente a remarcar son los supuestos, todos cumplen con un buen resultado, la media de los errores tiene un valor muy cercano a cero, mientras que los valores-p para la homoscesdasticidad (varianza constante) y la normalidad superan el valor de alpha usado (0.05), por otro lado, se resalta un valor de 0.76725 en la prueba de Durbin-Watson para la prueba de autocorrelación, a pesar de ser un valor más cercano a 1 que a 0, se puede asumir que no hay una autocorrelación positiva significativa, pero esto se explica a la cantidad de variables de impacto positivo en el modelo.
+
+Tuvimos resultados interesantes al evaluar las penalizaciones, e hizo falta un análisis intermedio con Elastic Net para llegar a un resultado satisfactorio y acorde al presentado en el modelo OLS, ambas aproximaciones llegaron a resultados similares (alrededor de 0.78), si analizamos los modelos Ridge y Lasso de forma cruda y sin la intervención del EN, notaremos que los valores arrojados de R^2 varían mucho y no son satisfactorios o concluyentes, las gráficas comparativas flaquean en ciertos puntos. Una vez que se estableció un parámetro diferente de $\alpha$ se nota una ligera mejora cuando se le pone más peso a la penalización ridge debido a que el R-cuadrado sube un poco mientras que la última métrica del procentaje de error disminiye, es decir, hay resultados más eficientes si $\alpha$ es un valor más bajo.
+
+Comparando el modelo OLS con el ANOVA, tenemos pocas diferencias, así que procedemos a revisar las variables significativas y su relación directa con Santander.
+
+- **ICC:** Una de las dos variables que no tienen presencia en el ANOVA, representa la confianza del consumidor respecto a su situación económica, esta variable tuvo un impacto positivo en el modelo, esto debido a que probablemente los clientes de Santander han visto mejorías en su economía personal al estar en este banco, influyendo en el consumo y la inversión sobre este.
+
+- **TICH:** La segunda variable que no tiene presencia en el ANOVA, representa las tasas de interés fijas, esta variable tuvo un impacto positivo en el modelo, los productos que ofrece Santander son variados y probablemente haya clientes que tenga más de uno, con tasas que varían desde el 4.9%-11.75% en préstamos personales, liquidez del 8.2%, hipotécas del 11.35%, etc.
+
+- **TC:** El tipo de cambio tuvo un impacto negativo, recordemos que Santander es un banco extranjero, por lo que si el peso se devalua, se disminuye el poder adquisitivo y habrá más cargas relacionadas a distintas deudas. 
+
+- **SMG:** El Banco Santander ha expresado su opinión sobre el aumento del salario mínimo en México, considerando que es mejor que no aumente demasiado para evitar presiones a la inflación, considera que es mejor que el salario mínimo aumente solo 12% en 2025, el salario mínimo en México se fijó en $278.80 MXN diarios, lo que equivale a $8,364 MXN mensuales, estos comentarios se reflejan en un impacto negaivo en el modelo. 
+
+- **Ing_Gob:** El Banco Santander tiene convenios de colaboración con gobiernos estatales y con la Secretaría de Economía. Estos convenios buscan generar inversión y crecimiento en el país, incluso otorgando múltiples becas con su programa de Open Academy, pero la razón de tener un impacto negativo en el modelo puede deberse precisamente por el apoyo que da al gobierno, con ciertos discontentos que ha tenido la población y los sucesos recientes. 
+
+- **TIN:** Se refiere a la tasa promedio ponderada de instrumentos de deuda de corto plazo, el Banco Santander utiliza la tasa de interés nominal para calcular el costo de oportunidad de no tener disponible el dinero que ha prestado. El TIN es el porcentaje que se suma al capital como coste o rentabilidad, presente en muchos de sus productos, con un máximo del 55%, teniendo así un impacto negativo en el modelo. 
+- **Deuda_Pub:** Representa la deuda total neta del sector público; El Banco Santander ha comprado deuda pública española y mexicana, y también ofrece fondos de inversión que pueden invertir en deuda pública. En 2022, Santander México tuvo una cuota de mercado del 26,6% en el Mercado de Capitales de Deuda Local. En 2023, Santander México se consolidó como Líder en el Mercado de Capitales de Deuda Local, razón por la que tuvo un impacto positivo en el modelo.
+
+- **Participación_Urbana:** Representa el porcentaje de la población en edad de trabajar que participa en el mercado laboral, en México, hay una gran parte de la población que tiene empleos informales, razón por la que esta variable tuvo un impacto negativo en el modelo, a pesar de que se puedan solventar los gastos y se disminuya la prob. de incumplimiento, no quita el hecho de que se tiene que participar de forma transparente.
+
+- **Prod_edif:** Esta variable representa el valor económico generado mediante edificaciones de varios campos; Santander ha tenido un papel respecto al cuidado del medio ambiente e incluso el cambio climático, sus edificios han sido diseñados para ser sostenibles y energéticamente eficientes. Cuentan con la certificación BREEAM “excelente”, que los acredita como sostenibles a nivel mundial, tanto en su construcción como en su explotación, minimizando así el impacto ambiental, razón por la cual tuvo un impacto positivo en el modelo.
+
+- **May_Text_Calz:** Esta variable representa la actividad económica de comercios al por mayor relacionada a los textiles y calzado; Santander tenía un valor bursátil de 74000 millones en 2019 en temas de textiles y calzado, esto cambió debido a su relación con la empresa INDITEX, un lider mundial textil, donde ahora cotizan alrededor de 143200 millones sólo en este sector, a un tipo de cambio de aproximadamente 10.6%, gracias a tendencias como el fast fashion.
+
+\newpage
+
+# BBVA
+
+Por último, los datos que faltan por analizar son del banco **BBVA**
+
+Ahora se va a repetir el mismo procedimiento pero ahora con los datos de la Probabilidad de Incumplimiento de **BBVA**
+
+```{r}
+# Score para BBVA
+BBVA_Score<- PD_bancos %>% 
+  select(BBVA) %>% 
+  mutate(BBVA = log((BBVA/100) / (1-(BBVA / 100))))
+colnames(BBVA_Score)<-"Score_BBVA"
+
+kable(head(BBVA_Score,10),align = "c")
+
+# Cambiar datos por los de BBVA
+variables_modelo<-data.frame(BBVA_Score,variables_modelo[-1])
+```
+
+## REGRESIÓN MÚLTIPLE
+
+```{r}
+# Regresión Múltiple
+predictoras<-colnames(variables_modelo)[-1]  # El Score se elimina de los nombres
+respuesta<-colnames(variables_modelo)[1]  # Variable de Respuesta
+formula_str<-paste(respuesta,"~",paste(predictoras,collapse = "+"))
+BBVA_reg_mult<-lm(as.formula(formula_str),data=variables_modelo)
+modelo_completo<-BBVA_reg_mult
+summary(BBVA_reg_mult)
+AIC(BBVA_reg_mult)
+```
+
+Se va a reducir el número de variables predictoras dejando solo las que son significativas
+
+```{r}
+# VARIABLES SIGNIFICATIVAS
+resumen<-summary(BBVA_reg_mult)
+significativas<-rownames(resumen$coefficients)[resumen$coefficients[,4]<0.05]
+significativas<-significativas[significativas!="(Intercept)"] # excluir intercepto B0
+significativas
+```
+
+```{r}
+# Regresión Múltiple
+respuesta<-colnames(variables_modelo)[1]  # Variable de Respuesta
+formula_str<-paste(respuesta,"~",paste(significativas,collapse = "+"))
+BBVA_reg_mult<-lm(as.formula(formula_str),data=variables_modelo)
+summary(BBVA_reg_mult)
+```
+
+```{r}
+# VARIABLES SIGNIFICATIVAS
+resumen<-summary(BBVA_reg_mult)
+significativas<-rownames(resumen$coefficients)[resumen$coefficients[,4]<0.05]
+significativas<-significativas[significativas!="(Intercept)"] # excluir intercepto B0
+significativas
+```
+
+```{r}
+# Regresión Múltiple
+respuesta<-colnames(variables_modelo)[1]  # Variable de Respuesta
+formula_str<-paste(respuesta,"~",paste(significativas,collapse = "+"))
+BBVA_reg_mult<-lm(as.formula(formula_str),data=variables_modelo)
+summary(BBVA_reg_mult)
+```
+
+```{r}
+# VARIABLES SIGNIFICATIVAS
+resumen<-summary(BBVA_reg_mult)
+significativas<-rownames(resumen$coefficients)[resumen$coefficients[,4]<0.05]
+significativas<-significativas[significativas!="(Intercept)"] # excluir intercepto B0
+significativas
+
+# BETAS
+coef(BBVA_reg_mult)
+```
+
+Ahora que todas las variables son significativas se procederá a calcular el Score y también se hará la transformación para regresar a la Probabilidad de Incumplimiento.
+
+```{r}
+# Cálculo del Score y de la PD estimada
+comparacion<-data.frame(PD_BBVA=PD_bancos$BBVA / 100,BBVA_Score)
+
+comparacion<- comparacion %>% 
+  mutate(Score_Predicho = as.numeric(predict(BBVA_reg_mult))) %>%
+  mutate(PD_Predicha=1/(1+exp(-1*Score_Predicho)))
+
+kable(head(comparacion,10),align = "cccc")
+```
+\newpage
+Después se realizará una gráfica para comparar los datos reales de Banorte con las predicciones del modelo de regresión.
+
+```{r}
+# Gráfica
+plot(comparacion$PD_BBVA,type="l",lwd=2,ylim=c(0,0.22),
+     main="PD Regresión Múltiple",
+     xlab="Meses",ylab="Probabilidad de Incumplimiento")
+lines(comparacion$PD_Predicha,type="l",col="red",lwd=2)
+legend(40, 0.1, legend=c("PD BBVA", "PD Regresión Múltiple"),
+       col=c("black", "red"),lwd=2,lty=1,cex=0.8)
+
+```
+\newpage
+
+## PENALIZACIÓN RIDGE
+
+```{r}
+# Validación Cruzada
+x1<-as.matrix(variables_modelo[-1])
+y1<-as.matrix(PD_bancos$BBVA)
+lambda_max<-max(abs(t(x1)%*%y1))/nrow(x1)
+cv.lambda<-cv.glmnet(x=x1,y=y1,alpha=0,lambda=exp(seq(log(lambda_max), log(lambda_max / 1000),
+                     length.out = 100)),nfolds = 10)  # ridge
+plot(cv.lambda)
+title("Penalización Ridge", line = 2.5)
+lmin<-cv.lambda$lambda.min   # penalización
+lmin
+```
+
+```{r}
+# Coeficientes
+BBVA_ridge<-glmnet(x=x1,y=y1,alpha=0,lambda = lmin)
+summary(BBVA_ridge)
+coef(BBVA_ridge)
+```
+
+```{r}
+# Predicciones del Score y la PD con la Penalización Ridge
+comparacion<-data.frame(PD_BBVA=PD_bancos$BBVA / 100,BBVA_Score)
+
+comparacion<- comparacion %>% 
+  mutate(PD_Ridge=as.numeric(predict(BBVA_ridge,newx=x1)) / 100) %>% 
+  mutate(Score_Ridge = log(PD_Ridge/(1-PD_Ridge))) %>%
+  mutate(Cuadrado_Errores=(PD_BBVA -PD_Ridge)^2,
+         Cuadrado_Total=(PD_BBVA-mean(PD_BBVA))^2)
+kable(head(comparacion),align = "cccccc")
+```
+
+```{r,fig.width=6.5,fig.height=3.6,fig.align='center'}
+# Gráfica de la Penalización Ridge
+plot(comparacion$PD_BBVA,type="l",lwd=2,ylim=c(0,0.20),
+     main="BBVA: PD con Penalización Ridge",
+     xlab="Meses",ylab="Probabilidad de Incumplimiento")
+lines(comparacion$PD_Ridge,type="l",col="blue",lwd=2)
+legend(40, 0.1, legend=c("PD BBVA", "PD Ridge"),
+       col=c("black", "blue"),lwd=2,lty=1,cex=0.8)
+```
+
+```{r}
+cat("El coeficiente de determinación R^2 ajustado es: ",adj_r_cuadrado(comparacion))
+
+# Cálculo del error para la penalización Ridge
+MAE_Ridge <- mean(abs(comparacion$PD_BBVA - comparacion$PD_BBVA))
+MSE_Ridge <- mean((comparacion$PD_BBVA - comparacion$PD_Ridge)^2)
+RMSE_Ridge <- sqrt(MSE_Ridge)
+MAPE_Ridge <- mean(abs((comparacion$PD_BBVA - comparacion$PD_Ridge) / comparacion$PD_BBVA)) * 100
+
+# Mostrar resultados
+cat("MAE Ridge:", MAE_Ridge, "\n")
+cat("MSE Ridge:", MSE_Ridge, "\n")
+cat("RMSE Ridge:", RMSE_Ridge, "\n")
+cat("MAPE Ridge:", MAPE_Ridge, "%\n")
+```
+\newpage
+
+## PENALIZACIÓN LASSO
+
+```{r}
+# Validación Cruzada
+x1<-as.matrix(variables_modelo[-1])
+y1<-as.matrix(PD_bancos$BBVA)
+lambda_max<-max(abs(t(x1)%*%y1))/nrow(x1)
+cv.lambda<-cv.glmnet(x=x1,y=y1,alpha=1,lambda=exp(seq(log(lambda_max), log(lambda_max / 1000),
+                                       length.out = 100)),nfolds = 10) # lasso
+plot(cv.lambda)
+title("Penalización Lasso", line = 2.5)
+lmin<-cv.lambda$lambda.min   # penalización
+lmin
+```
+
+
+```{r}
+# Coeficientes
+BBVA_lasso<-glmnet(x=x1,y=y1,alpha=1,lambda = lmin)
+summary(BBVA_lasso)
+coef(BBVA_lasso)
+```
+
+```{r}
+# Predicciones del Score y la PD con la Penalización Lasso
+comparacion<-data.frame(PD_BBVA=PD_bancos$BBVA / 100,BBVA_Score)
+
+comparacion<- comparacion %>% 
+  mutate(PD_Lasso=as.numeric(predict(BBVA_lasso,newx=x1))/100) %>% 
+  mutate(Score_Lasso = log(PD_Lasso/(1-PD_Lasso))) %>% 
+  mutate(Cuadrado_Errores=(PD_BBVA -PD_Lasso)^2,
+         Cuadrado_Total=(PD_BBVA-mean(PD_BBVA))^2)
+kable(head(comparacion),align = "cccccc")
+```
+
+```{r,fig.width=6.5,fig.height=3.6,fig.align='center'}
+# Gráfica de la Penalización Lasso
+plot(comparacion$PD_BBVA,type="l",lwd=2,ylim=c(0,0.20),
+     main="BBVA: PD con Penalización Lasso",
+     xlab="Meses",ylab="Probabilidad de Incumplimiento")
+lines(comparacion$PD_Lasso,type="l",lwd=2,col="green4")
+legend(40, 0.1, legend=c("PD BBVA", "PD Lasso"),
+       col=c("black", "green4"),lwd = 2,lty=1,cex=0.8)
+```
+
+```{r}
+cat("El coeficiente de determinación R^2 ajustado es: ",adj_r_cuadrado(comparacion))
+
+# Cálculo del error para la penalización Lasso
+MAE_Lasso <- mean(abs(comparacion$PD_BBVA-comparacion$PD_Lasso))
+MSE_Lasso <- mean((comparacion$PD_BBVA-comparacion$PD_Lasso)^2)
+RMSE_Lasso <- sqrt(MSE_Lasso)
+MAPE_Lasso <- mean(abs((comparacion$PD_BBVA-comparacion$PD_Lasso)/comparacion$PD_BBVA))*100
+
+# Mostrar resultados
+cat("MAE Lasso:", MAE_Lasso, "\n")
+cat("MSE Lasso:", MSE_Lasso, "\n")
+cat("RMSE Lasso:", RMSE_Lasso, "\n")
+cat("MAPE Lasso:", MAPE_Lasso, "%\n")
+```
+\newpage
+
+## PENALIZACIÓN ELASTIC NET
+
+Para ver lo que sucede cuando se modifica el parámetro de alpha dentro de la función **cv.lambda** se cambió el valor utilizado en la sección anterior y se estableció en $\alpha = 0.2$ indicando que la penalización Ridge tendrá mayor peso.
+
+```{r}
+# Validación Cruzada
+x1<-as.matrix(variables_modelo[-1])
+y1<-as.matrix(PD_bancos$BBVA)
+lambda_max<-max(abs(t(x1)%*%y1))/nrow(x1)
+cv.lambda<-cv.glmnet(x=x1,y=y1,alpha=0.2,lambda=exp(seq(log(lambda_max), log(lambda_max / 1000),
+                                        length.out = 100)),nfolds = 10) # elastic net
+plot(cv.lambda)
+title("Penalización Elastic Net", line = 2.5)
+lmin<-cv.lambda$lambda.min   # penalización
+lmin
+```
+
+```{r}
+# Coeficientes
+BBVA_elastic_net<-glmnet(x=x1,y=y1,alpha=0.2,lambda = lmin)
+summary(BBVA_elastic_net)
+coef(BBVA_elastic_net)
+```
+
+```{r}
+# Predicciones del Score y la PD con la Penalización Elastic Net
+comparacion<-data.frame(PD_BBVA=PD_bancos$BBVA / 100,BBVA_Score)
+
+comparacion<- comparacion %>% 
+  mutate(PD_Elastic_Net=as.numeric(predict(BBVA_elastic_net,newx=x1))/100)%>% 
+  mutate(Score_Elastic_Net = log(PD_Elastic_Net/(1-PD_Elastic_Net))) %>% 
+  mutate(Cuadrado_Errores=(PD_BBVA-PD_Elastic_Net)^2,
+         Cuadrado_Total=(PD_BBVA-mean(PD_BBVA))^2)
+kable(head(comparacion),align = "cccccc")
+```
+
+```{r,fig.width=6.5,fig.height=3.6,fig.align='center'}
+# Gráfica de la Penalización Elastic Net
+plot(comparacion$PD_BBVA,type="l",lwd=2,ylim=c(0,0.22),
+     main="BBVA: PD con Penalización Elastic Net",
+     xlab="Meses",ylab="Probabilidad de Incumplimiento")
+lines(comparacion$PD_Elastic_Net,type="l",col="orange2",lwd=2)
+legend(40, 0.1, legend=c("PD BBVA", "PD Elastic Net"),
+       col=c("black", "orange2"),lwd=2,lty=1,cex=0.8)
+```
+
+```{r}
+cat("El coeficiente de determinación R^2 ajustado es: ",adj_r_cuadrado(comparacion))
+
+# Cálculo del error para la penalización Elastic Net
+MAE_Elastic_Net <- mean(abs(comparacion$PD_BBVA-comparacion$PD_Elastic_Net))
+MSE_Elastic_Net <- mean((comparacion$PD_BBVA-comparacion$PD_Elastic_Net)^2)
+RMSE_Elastic_Net <- sqrt(MSE_Elastic_Net)
+MAPE_Elastic_Net <- mean(abs((comparacion$PD_BBVA-comparacion$PD_Elastic_Net)/comparacion$PD_BBVA))*100
+
+# Mostrar resultados
+cat("MAE Elastic Net:", MAE_Elastic_Net, "\n")
+cat("MSE Elastic Net:", MSE_Elastic_Net, "\n")
+cat("RMSE Elastic Net:", RMSE_Elastic_Net, "\n")
+cat("MAPE Elastic Net:", MAPE_Elastic_Net, "%\n")
+```
+\newpage
+
+## RESULTADOS
+
+```{r}
+# ANOVA
+anova(BBVA_reg_mult)
+AIC(BBVA_reg_mult)
+```
+
+```{r}
+# VERIFICACIÓN DE SUPUESTOS
+supuestos<-function(modelo){
+  # R^2 Ajustado
+  r_2<-summary(modelo)$adj.r.squared
+  # Media Cero
+  media<-mean(residuals(modelo))
+  # Homogeneidad de Varianza
+  breuch_pagan<-bptest(modelo)$p.value[[1]]
+  # Normalidad
+  anderson_darling<-ad.test(residuals(modelo))$p.value
+  # Independencia
+  durbin_watson<-dwtest(modelo)$statistic[[1]]
+  
+  return(c(cat("El r cuadrado ajustado es: ",r_2,"\n"),
+           cat("La media de los errores es:", media,"\n"),
+           cat("El valor p para la prueba de Homoscedasticidad de Varianza es ",
+               breuch_pagan,"\n"),
+           cat("El valor p para la prueba de Normalidad de los errores es ",
+               anderson_darling,"\n"),
+           cat("El estadístico para la prueba de Autocorrelación de los errores es ",
+               durbin_watson )))
+}
+supuestos(BBVA_reg_mult)
+```
+\newpage
+
+## INTERPRETACIÓN
+
+Antes de brindar un breve análisis de los resultados obtenidos en las pruebas realizadas con anterioridad es nececesario recordar que BBVA es el banco en México que más clientes tiene y que más creditos brinda a los mismos. De esta forma, se podria esperar que en comparación de las otras instituciones presente valores de riesgo más altos, es decir, es un banco con mayor riesgo sistematico.
+
+De las variables macroeconomicas seleccionadas solo las variables "TC","SMG","Deuda_Pub","Ing_Gob","TIN", "Participación_Urbana","Prod_Edif" fueron de relevancia para explicar el incumplimiento de pago en tarjetas de crédito de BBVA. El conocer cuales son las variables de relevancia es importante para tener una idea de como un cambio en estos indicadores afecta directamente a los ingresos por concepto de pago. Sin embargo, es necesario ahondar un poco más en cada una y ver que factores son los que hacen que esta relación sea tan crucial.
+
+- **TC (Tipo de Cambio)**: Esta variable se relaciona con BBVA, ya que al ser el banco más grande un cambio en el tipo de cambio puede modificar la forma en que sus clientes cumplen con sus obligaciones y también la forma en que sus responsabilidades cambian por efectos de las fluctuaciones.
+
+- **SMG (Salario Minimo)**: Una variación en el salario minimo afecta a los compromisos de los clientes con el banco porque un aumento de salario significa un cambio en la economia de las familias pero también de los provedores de empleos.
+
+- **Deuda_Pub (Deuda Publica)**: La deuda publica es de gran relevancia, ya que esta es un reflejo de la salud economica de una nación, esta puede dar señales para establcer una politica de credito más inclusiva o restrictiva.
+
+- **Ing_Gob (Ingresos Gubernanmentales)**: Los ingresos guberanmentales se obtienen de los impueestos que se recaudan. Por lo tanto, este indicador es un reflejo del sistema fiscal que brinda una idea de la forma en que se esta gestionando la politica fiscal de la nación, hecho de gran relevancia para la instiucion.
+
+- **TIN (Tasa de Interes Nominal)**: Es de relevancia porque ayuda a las instituciones a conocer como se encuentra la economia y también a establecer tasas para obtener ganancias de los intereses generados por los prestamos.
+
+- **Participación_Urbana (Tasa de Participación Urbana)**: Este indicador muestra como la población economicamente activa participa. Es decir, esto puede estar ligado a la inclusión financiera que existe.
+
+
+Ahora, se analizarán los modelos generados por los diferentes métodos para la regresion multilineal, minimos cuadros ordinarios (OLS), penalizacion Ridge, penalización Lasso y penalización Elastic Net. Se plantea establecer cual modelo es mejor de acuerdo a la forma en que recoge la información y se refleja en el valor de $R^2$ ajustado. Asi, se tiene que para el método de minimos cuadrados 0.7549, usando Ridge 0.0.8207938 , usando Lasso 0.8078839 y usando Elastic Net 0.8051917. De esta forma, es posible decir que el mejor modelo para BBVA es usando Elastic Net pues este se aproxima mejor a la información.
+
+\newpage
+
+# CONCLUSIÓN
+
+El presente estudio nos permitió analizar la probabilidad de incumplimiento en tarjetas de crédito para los principales bancos en México, incluyendo **Santander**, **Banamex**, **Banorte** y el agregado de **Total Banca Múltiple (TBM)**. A través de modelos de **regresión múltiple** y técnicas de penalización (**Ridge**, **Lasso** y **Elastic Net**), evaluamos los factores económicos que influyen en el comportamiento de pago de los clientes, identificando aquellos que tienen un mayor impacto en la morosidad.
+
+Durante el análisis de cada banco, encontramos que el **Tipo de cambio (TC)**, el **salario mínimo (SMG)**, la **Deuda pública (Deuda_Pub)**, la **Inversión en construcción (Prod_Edif)** y la **Confianza del consumidor (ICC)** son variables clave en la predicción del incumplimiento. En particular, el incremento en el **salario mínimo** mostró un efecto positivo en la reducción de la morosidad, lo que sugiere que una mayor capacidad adquisitiva de los clientes mejora el cumplimiento de sus obligaciones financieras. También observamos que la **deuda pública** tiene un impacto negativo, ya que su aumento puede derivar en recortes en el gasto gubernamental, afectando el ingreso de los ciudadanos y su capacidad de pago.
+
+Para cada banco, analizamos distintos **modelos de regresión** con el fin de identificar la técnica más precisa y eficiente:
+
+En el análisis de **Total Banca Múltiple (TBM)**, se evaluó el comportamiento agregado del sistema bancario. Se identificó que variables como el **salario mínimo**, la **deuda pública** y la **inversión en construcción** tienen una influencia determinante en la probabilidad de incumplimiento en tarjetas de crédito. Al considerar toda la banca múltiple, observamos que las relaciones entre estas variables y la morosidad son consistentes con los hallazgos en los bancos individuales. **Elastic Net** nuevamente mostró un alto desempeño, con un **R² ajustado de 0.88**, consolidándose como el modelo más confiable para predecir la probabilidad de incumplimiento en el sector bancario en su conjunto.
+
+Para **Banorte**, las variables más significativas fueron la **inversión en construcción (Prod_Edif)** y la **confianza del consumidor (ICC)**. Se observó que una mayor inversión en construcción está asociada con un menor riesgo de impago, ya que este sector impulsa el empleo y la estabilidad económica. La confianza del consumidor también tuvo un impacto importante, ya que cuando los clientes perciben estabilidad económica, es menos probable que incumplan con sus pagos. En este caso, **Elastic Net** presentó un **R² ajustado de 0.92**, lo que lo convirtió en el modelo más preciso para esta institución financiera.
+
+En el caso de **Banamex**, analizamos la influencia de factores como el **salario mínimo (SMG)**, la **deuda pública (Deuda_Pub)** y el **ingreso del gobierno (Ing_Gob)**. Encontramos que un aumento en el salario mínimo favorece la reducción del incumplimiento, ya que mejora la capacidad de pago de los clientes. **Elastic Net nuevamente** fue el modelo con mejor ajuste, obteniendo un **R² ajustado de 0.94**, lo que sugiere que las variables seleccionadas explican con gran precisión la morosidad de los clientes de este banco.
+
+Para **Santander**, encontramos que variables como el **tipo de cambio (TC)**, el índice de **confianza del consumidor (ICC)** y la **tasa de interés hipotecaria (TICH)** tienen un papel crucial en la morosidad. Un incremento en la confianza del consumidor disminuye la probabilidad de incumplimiento, mientras que una depreciación del peso tiende a elevar el riesgo de impago. Los modelos de penalización ayudaron a reducir la complejidad del modelo y mejorar su capacidad predictiva, siendo **Elastic Net** el mejor modelo con un **R² ajustado de 0.72**, lo que nos permitió capturar las relaciones más relevantes entre las variables sin sobreajustar el modelo.
+
+
+En términos de **modelos predictivos**, la técnica de **Elastic Net** se posicionó como la mejor opción en todos los casos, obteniendo valores de **R² ajustado superiores al 85%**. Esta técnica combina las ventajas de **Ridge** y **Lasso**, permitiendo seleccionar solo las variables más relevantes mientras se evita el sobreajuste. **Ridge**, al penalizar el tamaño de los coeficientes, fue útil para manejar colinealidades, pero no eliminó variables irrelevantes, lo que llevó a una menor interpretabilidad. Por otro lado, **Lasso** fue efectivo en la selección de variables, pero en algunos casos eliminó factores importantes, lo que afectó su precisión. **Elastic Net** resultó ser la mejor alternativa, ya que equilibra la regularización L1 (Lasso) y L2 (Ridge), permitiendo obtener un **modelo robusto** y con una mejor generalización de los datos.
+
+A lo largo del proyecto, aprendimos que el **análisis macroeconómico** es fundamental para comprender los riesgos en el **sistema financiero**. Descubrimos que la probabilidad de incumplimiento en tarjetas de crédito no solo depende del perfil individual de los clientes, sino también de factores económicos más amplios, como la estabilidad del mercado laboral, la política monetaria y la confianza de los consumidores. Asimismo, reforzamos la importancia de utilizar **modelos estadísticos** avanzados para la toma de decisiones en el sector financiero, permitiendo a las instituciones bancarias anticiparse a escenarios de riesgo y diseñar estrategias de mitigación más efectivas.
+
+En conclusión, este estudio nos deja valiosos aprendizajes sobre la relación entre la economía y el sistema financiero, demostrando que el uso de modelos como **Elastic Net** puede mejorar significativamente la predicción de impagos en tarjetas de crédito. La información obtenida no solo beneficia a los bancos en la gestión de riesgos, sino que también proporciona una mejor comprensión de los factores que afectan la estabilidad económica de los hogares y las empresas en México.
